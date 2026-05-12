@@ -313,7 +313,7 @@ def build_robot_runtime_config(
     if rt == K1_ROBOT_TYPE:
         return RobotRuntimeConfig(
             robot_type=K1_ROBOT_TYPE,
-            policy=policy_override or (mujoco_dir / "assets" / "policies" / "k1_mujoco_initial_walk_model_urdf_20260509" / "model" / "k1_walk_model_5500_torchscript.pt"),
+            policy=policy_override or (mujoco_dir / "assets" / "policies" / "k1_model_46000.pt"),
             robot_xml=robot_xml_override or (mujoco_dir / "assets" / "robots" / "k1" / "K1_22dof.xml"),
             policy_joint_names=K1_JOINTS_POLICY_ORDER,
             action_scale_cfg=K1_ACTION_SCALE,
