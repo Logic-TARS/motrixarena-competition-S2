@@ -28,6 +28,7 @@ from .runtime_config import (
     DEFAULT_CMD,
     FIXED_ROBOT_ID_TO_NAME,
     FIXED_ROBOT_NAME_TO_ID,
+    K1_ROBOT_TYPE,
     MAX_ROBOTS_PER_TEAM,
     PI_PLUS_KD_POLICY_ORDER,
     PI_PLUS_KP_POLICY_ORDER,
@@ -1255,10 +1256,8 @@ def _build_multi_robot_soccer_scene_xml(
                         copied.set("size", " ".join(f"{v:g}" for v in vals))
                         out_field_len = float(vals[0]) * 2.0
                         out_field_wid = float(vals[1]) * 2.0
-                # Increase rolling friction on pitch so kicked ball decelerates sooner.
-                copied.set("friction", "1.0 0.2 0.03")
-                copied.set("solref", "0.001 1")
-                copied.set("solimp", "0.9 0.95 0.001")
+                # Preserve MuJoCo pitch friction from source XML (do not override here).
+                # Preserve MuJoCo pitch contact parameters from source XML.
                 # Use flat color instead of texture so field markings stay controllable and clear.
                 copied.attrib.pop("material", None)
                 copied.set("rgba", "0.18 0.45 0.18 1")
@@ -1432,14 +1431,9 @@ class MultiRobotMotrixSim:
 
         self.model = mtx.load_model(str(scene_xml))
         self.data = mtx.SceneData(self.model, batch=[1])
-        self.sim_dt = float(self.robot_cfg.sim_dt)
-        self.model.options.timestep = self.sim_dt
-        if self.robot_cfg.robot_type == PI_PLUS_ROBOT_TYPE:
-            # Match sim2sim_pi_plus.py: only timestep is explicitly configured.
-            pass
-        else:
-            # MotrixSim uses its own integrator / solver; no MuJoCo RK4/noslip toggles.
-            pass
+        # Keep physics coefficients aligned with MuJoCo source scene (world.xml),
+        # including timestep/options loaded in the model.
+        self.sim_dt = float(self.model.options.timestep)
         self.control_decimation = int(self.robot_cfg.control_decimation)
 
         self._ball_body = None
@@ -2247,10 +2241,14 @@ class MultiRobotMotrixSim:
             spec.pi_target_dof_pos[:] = spec.pi_default_dof_pos
 
     def _hold_robot_at_reset_pose(self, spec: RobotSpec, x: float, y: float, theta: float):
-        # Keep current base height to avoid repeated "lift then drop" energy injection.
-        cur_z = float(self.data.dof_pos[0, spec.base_qpos_adr + 2])
-        if not np.isfinite(cur_z):
-            cur_z = float(self._startup_qpos[spec.base_qpos_adr + 2])
+        # Use a fixed reset height for k1 so post-fall recovery pose is stable and predictable.
+        if self.robot_cfg.robot_type == K1_ROBOT_TYPE:
+            cur_z = 0.6
+        else:
+            # Keep current base height for other robots to avoid lift/drop energy injection.
+            cur_z = float(self.data.dof_pos[0, spec.base_qpos_adr + 2])
+            if not np.isfinite(cur_z):
+                cur_z = float(self._startup_qpos[spec.base_qpos_adr + 2])
         applied = False
         try:
             rb = self.model.get_body(spec.name)

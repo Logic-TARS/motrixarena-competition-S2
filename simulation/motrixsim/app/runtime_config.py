@@ -205,7 +205,7 @@ DEFAULT_CMD = [0.0, 0.0, 0.0]
 USE_BODY_VEL_OBS = True
 RELOCATION_HOLD_SEC = 0.5
 MAX_ROBOTS_PER_TEAM = 7
-DEFAULT_POS = np.array([-3.5, 0.0, 0.57], dtype=np.float32)
+DEFAULT_POS = np.array([-3.5, 0.0, 0.52], dtype=np.float32)
 SLOWDOWN_FACTOR = 1.0
 
 K1_RESET_JOINT_POS = {
