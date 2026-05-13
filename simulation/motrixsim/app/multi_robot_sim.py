@@ -1945,12 +1945,41 @@ class MultiRobotMotrixSim:
             print(f"[Policy Frame {self._policy_step_count}] robot={debug_name} output(action): {debug_act}")
             self._printed_target_policy_io = True
 
+    def _set_actuator_ctrls(self, act_idx: np.ndarray, values: np.ndarray | float) -> None:
+        """
+        Prefer actuator.set_ctrl(): in some Motrix bindings, direct writes to
+        data.actuator_ctrls are not applied to simulator state.
+        """
+        idx = np.asarray(act_idx, dtype=np.int64).reshape(-1)
+        if idx.size == 0:
+            return
+        val = np.asarray(values, dtype=np.float32).reshape(-1)
+        if val.size == 1 and idx.size > 1:
+            val = np.full((idx.size,), float(val[0]), dtype=np.float32)
+        n = min(idx.size, val.size)
+        for k in range(n):
+            ai = int(idx[k])
+            ctrl = float(val[k])
+            applied = False
+            try:
+                actuator = self.model.get_actuator(ai)
+                if actuator is not None:
+                    actuator.set_ctrl(self.data, np.array([ctrl], dtype=np.float32))
+                    applied = True
+            except Exception:
+                applied = False
+            if not applied:
+                try:
+                    self.data.actuator_ctrls[0, ai] = ctrl
+                except Exception:
+                    pass
+
     def _apply_torque(self):
         for spec in self.robot_specs.values():
             if self._is_robot_protected(spec.rid):
-                self.data.actuator_ctrls[0, spec.act_idx] = self._startup_ctrl[spec.act_idx]
+                self._set_actuator_ctrls(spec.act_idx, self._startup_ctrl[spec.act_idx])
                 if spec.pi_act_idx_mujoco is not None:
-                    self.data.actuator_ctrls[0, spec.pi_act_idx_mujoco] = self._startup_ctrl[spec.pi_act_idx_mujoco]
+                    self._set_actuator_ctrls(spec.pi_act_idx_mujoco, self._startup_ctrl[spec.pi_act_idx_mujoco])
                 continue
             use_pi_pd = (
                 self.robot_cfg.robot_type == PI_PLUS_ROBOT_TYPE
@@ -1975,9 +2004,9 @@ class MultiRobotMotrixSim:
             tau = np.clip(tau, -spec.effort, spec.effort)
             tau = np.nan_to_num(tau, nan=0.0, posinf=0.0, neginf=0.0)
             if use_pi_pd:
-                self.data.actuator_ctrls[0, spec.pi_act_idx_mujoco] = tau
+                self._set_actuator_ctrls(spec.pi_act_idx_mujoco, tau)
             else:
-                self.data.actuator_ctrls[0, spec.act_idx] = tau
+                self._set_actuator_ctrls(spec.act_idx, tau)
 
     def _step_once(self, counter: int) -> int:
         pre_hold_changed = self._apply_robot_protection_holds()
@@ -2060,18 +2089,21 @@ class MultiRobotMotrixSim:
                     if pos_idx.size > 0 and vel_idx.size > 0:
                         q_all = np.asarray(self.data.dof_pos[0, pos_idx], dtype=np.float32).copy()
                         v_all = np.asarray(self.data.dof_vel[0, vel_idx], dtype=np.float32).copy()
+                        mapped = 0
                         for j, gq in enumerate(np.asarray(q_idx, dtype=np.int64)):
                             q_loc = np.where(pos_idx == gq)[0]
                             if q_loc.size > 0:
                                 q_all[int(q_loc[0])] = float(q_clip[j])
+                                mapped += 1
                             if hit[j]:
                                 gv = int(np.asarray(v_idx, dtype=np.int64)[j])
                                 v_loc = np.where(vel_idx == gv)[0]
                                 if v_loc.size > 0:
                                     v_all[int(v_loc[0])] = 0.0
-                        rb.set_dof_pos(self.data, q_all)
-                        rb.set_dof_vel(self.data, v_all)
-                        applied = True
+                        if mapped > 0:
+                            rb.set_dof_pos(self.data, q_all)
+                            rb.set_dof_vel(self.data, v_all)
+                            applied = True
             except Exception:
                 applied = False
 
@@ -2079,7 +2111,7 @@ class MultiRobotMotrixSim:
                 # Fallback path for environments where body-level set_* is unavailable.
                 self.data.dof_pos[0, q_idx] = q_clip
                 self.data.dof_vel[0, v_idx[hit]] = 0.0
-            self.data.actuator_ctrls[0, a_idx[hit]] = 0.0
+            self._set_actuator_ctrls(a_idx[hit], 0.0)
             changed = True
         return changed
 
@@ -2204,9 +2236,9 @@ class MultiRobotMotrixSim:
         if spec.pi_qpos_idx_mujoco is not None and spec.pi_qvel_idx_mujoco is not None:
             self.data.dof_pos[0, spec.pi_qpos_idx_mujoco] = self._startup_qpos[spec.pi_qpos_idx_mujoco]
             self.data.dof_vel[0, spec.pi_qvel_idx_mujoco] = self._startup_qvel[spec.pi_qvel_idx_mujoco]
-        self.data.actuator_ctrls[0, spec.act_idx] = self._startup_ctrl[spec.act_idx]
+        self._set_actuator_ctrls(spec.act_idx, self._startup_ctrl[spec.act_idx])
         if spec.pi_act_idx_mujoco is not None:
-            self.data.actuator_ctrls[0, spec.pi_act_idx_mujoco] = self._startup_ctrl[spec.pi_act_idx_mujoco]
+            self._set_actuator_ctrls(spec.pi_act_idx_mujoco, self._startup_ctrl[spec.pi_act_idx_mujoco])
         spec.last_action[:] = 0.0
         spec.filtered_dof_target[:] = spec.init_angles
         spec.target_joint_pos[:] = spec.init_angles
@@ -2283,7 +2315,7 @@ class MultiRobotMotrixSim:
         self.data = mtx.SceneData(self.model, batch=[1])
         self.data.dof_pos[0, :] = self._startup_qpos
         self.data.dof_vel[0, :] = self._startup_qvel
-        self.data.actuator_ctrls[0, :] = self._startup_ctrl
+        self._set_actuator_ctrls(np.arange(self._startup_ctrl.shape[0], dtype=np.int64), self._startup_ctrl)
         self._apply_saved_spawn_points()
         self._restore_ball_state(ball_state)
         for spec in self.robot_specs.values():
