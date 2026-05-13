@@ -349,6 +349,10 @@ FALL_RESET_PROTECT_SEC = 1.5
 FALL_UPRIGHT_DOT_MIN = 0.2
 FALL_CONFIRM_FRAMES = 10
 
+# Extra root height when instantiating robots in the merged scene (meters).
+# Helps avoid initial penetrations with non-planar or thick floor collision (e.g. mesh stadium).
+ROBOT_SPAWN_Z_LIFT_M = 0.04
+
 
 def _load_checkpoint_compat(path: Path, map_location: torch.device):
     try:
@@ -1191,7 +1195,8 @@ def _build_multi_robot_soccer_scene_xml(
                 x, y, theta = selected_spawns[i]
             else:
                 x, y, theta = _spawn_xy_theta(team, i, count, target_field_size)
-            body_copy.set("pos", f"{x:.6f} {y:.6f} {template_spawn_z:.6f}")
+            spawn_z = float(template_spawn_z) + float(ROBOT_SPAWN_Z_LIFT_M)
+            body_copy.set("pos", f"{x:.6f} {y:.6f} {spawn_z:.6f}")
             body_copy.set("quat", " ".join(f"{v:.9g}" for v in _quat_from_yaw(theta)))
             worldbody.append(body_copy)
 
