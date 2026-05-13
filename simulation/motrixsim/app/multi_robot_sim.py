@@ -190,6 +190,7 @@ class _MotrixHeadlessRenderer:
         self._h = max(1, int(height))
         self._w = max(1, int(width))
         self._capture_cam_index = 0
+        self._camera_indices: dict[str, int] = {}
         # Motrix docs: camera render target must be configured BEFORE RenderApp.launch().
         # Without this, headless capture can fallback to Window(Primary) and return no frames.
         try:
@@ -197,14 +198,24 @@ class _MotrixHeadlessRenderer:
             for i in range(len(cam_mgr)):
                 cam = cam_mgr[i]
                 try:
+                    nm = str(getattr(cam, "name", ""))
+                    if nm:
+                        self._camera_indices[nm] = int(i)
+                except Exception:
+                    pass
+                try:
                     cam.set_render_target("image", self._w, self._h)
                 except Exception:
                     continue
             # Prefer our injected scene camera when available.
             try:
-                idx = cam_mgr.get_index("lab_webview_camera")
+                idx = cam_mgr.get_index("lab_webview_diagonal")
                 if idx is not None:
                     self._capture_cam_index = int(idx)
+                else:
+                    idx = cam_mgr.get_index("lab_webview_camera")
+                    if idx is not None:
+                        self._capture_cam_index = int(idx)
             except Exception:
                 pass
         except Exception:
@@ -228,6 +239,21 @@ class _MotrixHeadlessRenderer:
         self._last_task = None
         self._last_rgb: np.ndarray | None = None
         self._capture_done_warned = False
+
+    def set_capture_camera(self, camera_name: str | None) -> None:
+        if not camera_name:
+            return
+        idx = self._camera_indices.get(str(camera_name), None)
+        if idx is None:
+            return
+        try:
+            cam = self._app.get_camera(int(idx))
+        except Exception:
+            cam = None
+        if cam is None:
+            return
+        self._capture_cam_index = int(idx)
+        self._cam = cam
 
     def update_scene(self, data, camera=None, scene_option=None):
         self._app.sync(data, wait=False)
@@ -622,20 +648,65 @@ def _prefix_body_tree_names(body: ET.Element, robot_name: str):
 
 
 def _ensure_default_scene_camera_for_motrix(worldbody: ET.Element) -> None:
-    """MotrixSim RenderApp.get_camera(i) is only defined when the MJCF defines at least one camera."""
-    if any(ch.tag == "camera" for ch in worldbody):
-        return
-    # Aim at the field center; do not use axis-aligned down view from corner
-    # (it can miss the pitch entirely and look like an empty dark frame).
-    ET.SubElement(
-        worldbody,
-        "camera",
-        name="lab_webview_camera",
-        pos="-14 -14 12",
-        mode="fixed",
-        fovy="55",
-        xyaxes="0.7071068 -0.7071068 0 0.3478566 0.3478566 0.8703883",
-    )
+    """Ensure Motrix webview cameras exist for preset switching."""
+
+    def _xyaxes_from_eye_look(eye: tuple[float, float, float], look: tuple[float, float, float]) -> str:
+        eye_v = np.asarray(eye, dtype=np.float64)
+        look_v = np.asarray(look, dtype=np.float64)
+        fwd = look_v - eye_v
+        fn = float(np.linalg.norm(fwd))
+        if fn < 1e-8:
+            fwd = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+        else:
+            fwd = fwd / fn
+        up = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        if abs(float(np.dot(fwd, up))) > 0.98:
+            up = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+        x = np.cross(up, fwd)
+        xn = float(np.linalg.norm(x))
+        if xn < 1e-8:
+            x = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+        else:
+            x = x / xn
+        # MuJoCo camera looks along -Z where Z = X x Y.
+        y = np.cross(x, fwd)
+        y = y / max(1e-8, float(np.linalg.norm(y)))
+        # Rotate camera image by 180deg around view axis (flip screen up/right).
+        x = -x
+        y = -y
+        return f"{x[0]:.7g} {x[1]:.7g} {x[2]:.7g} {y[0]:.7g} {y[1]:.7g} {y[2]:.7g}"
+
+    existing = {str(ch.get("name", "")) for ch in worldbody if ch.tag == "camera"}
+    presets = {
+        "lab_webview_diagonal": ((-10.0, -10.0, 10.0), (0.0, 0.0, 0.8)),
+        "lab_webview_top": ((0.0, 0.0, 18.0), (0.0, 0.0, 0.8)),
+        "lab_webview_side": ((0.0, 12.0, 6.0), (0.0, 0.0, 0.8)),
+        "lab_webview_goal_left": ((-8.0, 0.0, 3.0), (0.0, 0.0, 0.9)),
+        "lab_webview_goal_right": ((8.0, 0.0, 3.0), (0.0, 0.0, 0.9)),
+    }
+    for cam_name, (eye, look) in presets.items():
+        if cam_name in existing:
+            continue
+        ET.SubElement(
+            worldbody,
+            "camera",
+            name=cam_name,
+            pos=f"{eye[0]:.7g} {eye[1]:.7g} {eye[2]:.7g}",
+            mode="fixed",
+            fovy="55",
+            xyaxes=_xyaxes_from_eye_look(eye, look),
+        )
+    # Backward-compatible alias used by older code paths.
+    if "lab_webview_camera" not in existing:
+        ET.SubElement(
+            worldbody,
+            "camera",
+            name="lab_webview_camera",
+            pos="-10 -10 10",
+            mode="fixed",
+            fovy="55",
+            xyaxes=_xyaxes_from_eye_look((-10.0, -10.0, 10.0), (0.0, 0.0, 0.8)),
+        )
 
 
 def _spawn_xy_theta(team: str, idx: int, count: int, field_size: tuple[float, float] | None) -> tuple[float, float, float]:
@@ -649,8 +720,15 @@ def _spawn_xy_theta(team: str, idx: int, count: int, field_size: tuple[float, fl
 
 
 def _quat_from_yaw(theta: float) -> np.ndarray:
+    # MJCF quaternion order is wxyz.
     half = 0.5 * float(theta)
     return np.array([np.cos(half), 0.0, 0.0, np.sin(half)], dtype=np.float32)
+
+
+def _quat_xyzw_from_yaw(theta: float) -> np.ndarray:
+    # Motrix runtime dof_pos quaternion order is xyzw.
+    half = 0.5 * float(theta)
+    return np.array([0.0, 0.0, np.sin(half), np.cos(half)], dtype=np.float32)
 
 
 def _add_procedural_goals(
@@ -1207,8 +1285,8 @@ class MLPActor(nn.Module):
         return self.actor(x)
 
 
-def _quat_to_rot_world_from_body(quat_wxyz: np.ndarray) -> np.ndarray:
-    w, x, y, z = quat_wxyz
+def _quat_to_rot_world_from_body(quat_xyzw: np.ndarray) -> np.ndarray:
+    x, y, z, w = quat_xyzw
     return np.array(
         [
             [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - w * z), 2.0 * (x * z + w * y)],
@@ -1354,11 +1432,28 @@ class MultiRobotMotrixSim:
         self._ball_geom_contact_pairs, self._ball_geom_contact_rids = _mtx_ball_robot_contact_pairs(self.model)
         self._ball_qpos_adr: int | None = None
         self._ball_qvel_adr: int | None = None
+        self._ball_qpos_idx: np.ndarray | None = None
+        self._ball_qvel_idx: np.ndarray | None = None
         try:
             self._ball_qpos_adr = _mtx_joint_qpos_start(self.model, "ball-root")
             self._ball_qvel_adr = _mtx_joint_qvel_start(self.model, "ball-root")
         except Exception:
             pass
+        if self._ball_body is not None:
+            try:
+                pos_idx = np.asarray(
+                    self._ball_body.get_dof_pos_indices(include_floatingbase=True), dtype=np.int64
+                ).reshape(-1)
+                vel_idx = np.asarray(
+                    self._ball_body.get_dof_vel_indices(include_floatingbase=True), dtype=np.int64
+                ).reshape(-1)
+                if pos_idx.size >= 7:
+                    self._ball_qpos_idx = pos_idx[:7].astype(np.int64, copy=False)
+                if vel_idx.size >= 6:
+                    self._ball_qvel_idx = vel_idx[:6].astype(np.int64, copy=False)
+            except Exception:
+                self._ball_qpos_idx = None
+                self._ball_qvel_idx = None
 
         self.policy_device = self._resolve_policy_device(args.policy_device)
         print(f"[MultiRobotMotrixSim] policy device: {self.policy_device}")
@@ -1426,10 +1521,12 @@ class MultiRobotMotrixSim:
             print("[MultiRobotMotrixSim] referee: disabled")
 
         self._web_camera = None
+        self._web_capture_camera_name = "lab_webview_diagonal"
         self._fallback_frame_logged = False
         self._render_scene_option = None
         self._step_fail_count = 0
         self._last_step_fail_log = 0.0
+        self._last_web_cmd_log = 0.0
         if args.render_collision_meshes:
             print("[MultiRobotMotrixSim] render_collision_meshes ignored (MotrixSim web render path)")
 
@@ -1853,13 +1950,12 @@ class MultiRobotMotrixSim:
             if now - self._last_step_fail_log >= 1.0:
                 self._last_step_fail_log = now
                 print(
-                    "[MotrixSim] model.step failed; resetting scene to recover "
+                    "[MotrixSim] model.step failed; skip this step to keep web controls responsive "
                     f"(count={self._step_fail_count}, err={type(e).__name__}: {e})"
                 )
-            # Motrix may throw pyo3 panic exceptions on ill-conditioned steps.
-            # Recover in-place instead of letting the whole process terminate.
-            self.reset(preserve_ball=True)
-            return 0
+            # Keep process alive and preserve current state/teleport commands.
+            # Full reset here makes interactive controls appear ineffective.
+            return counter + 1
         self._update_referee(self.sim_dt)
         post_hold_changed = self._apply_robot_protection_holds()
         if post_hold_changed:
@@ -2000,11 +2096,30 @@ class MultiRobotMotrixSim:
             spec.pi_target_dof_pos[:] = spec.pi_default_dof_pos
 
     def _hold_robot_at_reset_pose(self, spec: RobotSpec, x: float, y: float, theta: float):
-        self._reset_one_robot(spec)
-        self.data.dof_pos[0][spec.base_qpos_adr + 0] = float(x)
-        self.data.dof_pos[0][spec.base_qpos_adr + 1] = float(y)
-        self.data.dof_pos[0][spec.base_qpos_adr + 3 : spec.base_qpos_adr + 7] = _quat_from_yaw(float(theta))
-        self.data.dof_vel[0][spec.base_qvel_adr : spec.base_qvel_adr + 6] = 0.0
+        applied = False
+        try:
+            rb = self.model.get_body(spec.name)
+            if rb is not None:
+                pos_idx = np.asarray(rb.get_dof_pos_indices(include_floatingbase=True), dtype=np.int64).reshape(-1)
+                vel_idx = np.asarray(rb.get_dof_vel_indices(include_floatingbase=True), dtype=np.int64).reshape(-1)
+                if pos_idx.size >= 7 and vel_idx.size >= 6:
+                    q = self._startup_qpos[pos_idx].copy()
+                    v = self._startup_qvel[vel_idx].copy()
+                    q[0] = float(x)
+                    q[1] = float(y)
+                    q[3:7] = _quat_xyzw_from_yaw(float(theta))
+                    v[:6] = 0.0
+                    rb.set_dof_pos(self.data, q)
+                    rb.set_dof_vel(self.data, v)
+                    applied = True
+        except Exception:
+            applied = False
+        if not applied:
+            self._reset_one_robot(spec)
+            self.data.dof_pos[0, spec.base_qpos_adr + 0] = float(x)
+            self.data.dof_pos[0, spec.base_qpos_adr + 1] = float(y)
+            self.data.dof_pos[0, spec.base_qpos_adr + 3 : spec.base_qpos_adr + 7] = _quat_xyzw_from_yaw(float(theta))
+            self.data.dof_vel[0, spec.base_qvel_adr : spec.base_qvel_adr + 6] = 0.0
         self.command_buffer[spec.rid] = np.array(DEFAULT_CMD, dtype=np.float32)
         self.command_ts[spec.rid] = float("-inf")
         self.command_received[spec.rid] = True
@@ -2099,20 +2214,20 @@ class MultiRobotMotrixSim:
                 qpos_adr = int(self._ball_qpos_adr)
                 qvel_adr = int(self._ball_qvel_adr)
                 z = float(self._startup_qpos[qpos_adr + 2])
-                self.data.dof_pos[0][qpos_adr + 0] = x
-                self.data.dof_pos[0][qpos_adr + 1] = y
-                self.data.dof_pos[0][qpos_adr + 2] = z
-                self.data.dof_pos[0][qpos_adr + 3 : qpos_adr + 7] = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
-                self.data.dof_vel[0][qvel_adr : qvel_adr + 6] = 0.0
+                self.data.dof_pos[0, qpos_adr + 0] = x
+                self.data.dof_pos[0, qpos_adr + 1] = y
+                self.data.dof_pos[0, qpos_adr + 2] = z
+                self.data.dof_pos[0, qpos_adr + 3 : qpos_adr + 7] = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
+                self.data.dof_vel[0, qvel_adr : qvel_adr + 6] = 0.0
                 continue
             rid = FIXED_ROBOT_NAME_TO_ID.get(name)
             if rid is None or rid not in self.robot_specs:
                 continue
             spec = self.robot_specs[rid]
-            self.data.dof_pos[0][spec.base_qpos_adr + 0] = x
-            self.data.dof_pos[0][spec.base_qpos_adr + 1] = y
-            self.data.dof_pos[0][spec.base_qpos_adr + 3 : spec.base_qpos_adr + 7] = _quat_from_yaw(theta)
-            self.data.dof_vel[0][spec.base_qvel_adr : spec.base_qvel_adr + 6] = 0.0
+            self.data.dof_pos[0, spec.base_qpos_adr + 0] = x
+            self.data.dof_pos[0, spec.base_qpos_adr + 1] = y
+            self.data.dof_pos[0, spec.base_qpos_adr + 3 : spec.base_qpos_adr + 7] = _quat_xyzw_from_yaw(theta)
+            self.data.dof_vel[0, spec.base_qvel_adr : spec.base_qvel_adr + 6] = 0.0
 
     def teleport_robot(self, robot_name: str, x: float, y: float, theta: float | None):
         rid = FIXED_ROBOT_NAME_TO_ID.get(robot_name, None)
@@ -2129,21 +2244,54 @@ class MultiRobotMotrixSim:
         self.model.forward_kinematic(self.data)
 
     def teleport_ball(self, x: float, y: float, z: float | None):
-        if self._ball_qpos_adr is None or self._ball_qvel_adr is None:
+        if self._ball_body is not None:
+            try:
+                pos_idx = np.asarray(
+                    self._ball_body.get_dof_pos_indices(include_floatingbase=True), dtype=np.int64
+                ).reshape(-1)
+                vel_idx = np.asarray(
+                    self._ball_body.get_dof_vel_indices(include_floatingbase=True), dtype=np.int64
+                ).reshape(-1)
+                if pos_idx.size >= 7 and vel_idx.size >= 6:
+                    q = self.data.dof_pos[0, pos_idx].copy()
+                    v = self.data.dof_vel[0, vel_idx].copy()
+                    if z is None:
+                        z = float(q[2])
+                    q[0] = float(x)
+                    q[1] = float(y)
+                    q[2] = float(z)
+                    q[3:7] = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
+                    v[:6] = 0.0
+                    self._ball_body.set_dof_pos(self.data, q)
+                    self._ball_body.set_dof_vel(self.data, v)
+                    self.model.forward_kinematic(self.data)
+                    return
+            except Exception:
+                pass
+        if self._ball_qpos_adr is not None and self._ball_qvel_adr is not None:
+            qpos_adr = int(self._ball_qpos_adr)
+            qvel_adr = int(self._ball_qvel_adr)
+            if z is None:
+                z = float(self.data.dof_pos[0, qpos_adr + 2])
+            self.data.dof_pos[0, qpos_adr + 0] = float(x)
+            self.data.dof_pos[0, qpos_adr + 1] = float(y)
+            self.data.dof_pos[0, qpos_adr + 2] = float(z)
+            self.data.dof_pos[0, qpos_adr + 3 : qpos_adr + 7] = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
+            self.data.dof_vel[0, qvel_adr : qvel_adr + 6] = 0.0
+        elif self._ball_qpos_idx is not None and self._ball_qvel_idx is not None:
+            if z is None:
+                z = float(self.data.dof_pos[0, int(self._ball_qpos_idx[2])])
+            self.data.dof_pos[0, self._ball_qpos_idx[0]] = float(x)
+            self.data.dof_pos[0, self._ball_qpos_idx[1]] = float(y)
+            self.data.dof_pos[0, self._ball_qpos_idx[2]] = float(z)
+            self.data.dof_pos[0, self._ball_qpos_idx[3:7]] = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
+            self.data.dof_vel[0, self._ball_qvel_idx[:6]] = 0.0
+        else:
             return
-        qpos_adr = int(self._ball_qpos_adr)
-        qvel_adr = int(self._ball_qvel_adr)
-        if z is None:
-            z = float(self.data.dof_pos[0][qpos_adr + 2])
-        self.data.dof_pos[0][qpos_adr + 0] = float(x)
-        self.data.dof_pos[0][qpos_adr + 1] = float(y)
-        self.data.dof_pos[0][qpos_adr + 2] = float(z)
-        self.data.dof_pos[0][qpos_adr + 3 : qpos_adr + 7] = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
-        self.data.dof_vel[0][qvel_adr : qvel_adr + 6] = 0.0
         self.model.forward_kinematic(self.data)
 
-    def _yaw_from_quat(self, quat_wxyz: np.ndarray) -> float:
-        qw, qx, qy, qz = quat_wxyz
+    def _yaw_from_quat(self, quat_xyzw: np.ndarray) -> float:
+        qx, qy, qz, qw = quat_xyzw
         return float(np.arctan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz)))
 
     def state_for_web(self) -> dict:
@@ -2292,9 +2440,17 @@ class MultiRobotMotrixSim:
             "Goal_Left": ((-8.0, 0.0, 3.0), (0.0, 0.0, 0.9)),
             "Goal_Right": ((8.0, 0.0, 3.0), (0.0, 0.0, 0.9)),
         }
+        preset_to_cam = {
+            "Top": "lab_webview_top",
+            "Side": "lab_webview_side",
+            "Diagonal": "lab_webview_diagonal",
+            "Goal_Left": "lab_webview_goal_left",
+            "Goal_Right": "lab_webview_goal_right",
+        }
         if preset in presets:
             eye, lookat = presets[preset]
             self._set_camera_eye_lookat(eye, lookat)
+            self._web_capture_camera_name = preset_to_cam.get(preset, "lab_webview_diagonal")
 
     def _safe_create_renderer(self, width: int, height: int):
         candidates = [(width, height), (640, 480), (480, 360), (320, 240)]
@@ -2312,28 +2468,35 @@ class MultiRobotMotrixSim:
 
     def _apply_web_commands(self, cmds, counter: int) -> tuple[int, bool]:
         reset_triggered = False
+        now_log = time.monotonic()
+        cmd_summary: list[str] = []
         if cmds.spawn_points is not None:
             self.set_spawn_points(cmds.spawn_points)
+            cmd_summary.append("spawn_points")
         if cmds.velocity_cmds is not None:
             for name, vx, vy, wz in cmds.velocity_cmds:
                 rid = FIXED_ROBOT_NAME_TO_ID.get(name, None)
                 if rid is None:
                     continue
                 self.set_command(float(vx), float(vy), float(wz), robot_id=rid, timestamp=time.time(), source="webview")
+            cmd_summary.append(f"velocity:{len(cmds.velocity_cmds)}")
         if cmds.reset_env:
             # Reset robots/ball/runtime state but keep current referee state.
             self.reset(preserve_ball=False, reset_referee=False)
             counter = 0
             reset_triggered = True
+            cmd_summary.append("reset_env")
         if cmds.restart_match:
             # Restart full match state: reset robots, ball, and referee.
             self.reset(preserve_ball=False, reset_referee=True)
             counter = 0
             reset_triggered = True
+            cmd_summary.append("restart_match")
         if cmds.viewer_point is not None and self._web_camera is not None:
             look = tuple(float(x) for x in self._web_camera.lookat)
             eye = tuple(float(x) for x in cmds.viewer_point)
             self._set_camera_eye_lookat(eye, look)
+            cmd_summary.append("viewer_point")
         if cmds.viewer_look_at is not None and self._web_camera is not None:
             d = float(self._web_camera.distance)
             az = np.radians(float(self._web_camera.azimuth))
@@ -2346,19 +2509,27 @@ class MultiRobotMotrixSim:
             )
             look = tuple(float(x) for x in cmds.viewer_look_at)
             self._set_camera_eye_lookat(eye, look)
+            cmd_summary.append("viewer_look_at")
         if cmds.camera_preset is not None:
             self._apply_camera_preset(cmds.camera_preset)
+            cmd_summary.append(f"camera:{cmds.camera_preset}")
         if cmds.teleport_cmd is not None:
             name, x, y, z, theta = cmds.teleport_cmd
             if name in FIXED_ROBOT_NAME_TO_ID:
                 self.teleport_robot(name, x, y, None if theta is None else float(theta))
                 counter = 0
                 reset_triggered = True
+                cmd_summary.append(f"teleport_robot:{name}")
             elif name == "ball":
                 # Teleport ball directly so robot pose/velocity/control state are unaffected.
                 self.teleport_ball(x, y, None if z is None else float(z))
+                cmd_summary.append("teleport_ball")
         if cmds.referee_command is not None and self.referee is not None:
             self._apply_referee_command(cmds.referee_command)
+            cmd_summary.append(f"referee:{cmds.referee_command}")
+        if cmd_summary and (now_log - self._last_web_cmd_log >= 0.8):
+            self._last_web_cmd_log = now_log
+            print(f"[MotrixWebView] apply_web_commands: {', '.join(cmd_summary)}")
         return counter, reset_triggered
 
     def _apply_referee_command(self, cmd: str):
@@ -2458,6 +2629,7 @@ class MultiRobotMotrixSim:
                 if webview is not None:
                     now = time.time()
                     if renderer is not None and now >= next_frame_time:
+                        renderer.set_capture_camera(getattr(self, "_web_capture_camera_name", None))
                         renderer.update_scene(self.data, camera=self._web_camera)
                         frame = renderer.render()
                         webview.emit_frame(frame)

@@ -58,6 +58,9 @@
                 <div class="control-row" style="justify-content: center;">
                     <canvas id="minimap" width="400" height="250"></canvas>
                 </div>
+                <div id="drag-debug" style="font-size:11px;color:#555;text-align:center;margin-top:4px;">
+                    drag debug: idle
+                </div>
                 <div class="control-row" style="font-size: 12px;">
                     <p><strong>Legend:</strong> ⚪Ball, 🔴Red, 🔵Blue</p>
                 </div>
@@ -115,7 +118,7 @@
                             }
                         });
                         // Send to backend for storage
-                        socket.emit('set_initial_positions', savedSpawnPositions);
+                        emitControl('set_initial_positions', savedSpawnPositions);
                         document.getElementById('spawn-status').textContent =
                             `✓ Saved ${Object.keys(savedSpawnPositions).length} spawn points (${redCount}v${blueCount})`;
                     }
@@ -139,7 +142,7 @@
                 </div>
                 <script>
                     function sendRefereeCommand(cmd) {
-                        socket.emit('referee_command', { command: cmd });
+                        emitControl('referee_command', { command: cmd });
                     }
                 </script>
             </div>
@@ -262,6 +265,26 @@
             const el = document.getElementById("status");
             if (el) el.textContent = text;
         }
+
+        async function emitControl(event, data = {}) {
+            // HTTP-first control path is more robust in our Flask threaded setup.
+            try {
+                const resp = await fetch('/api/command', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ event, data }),
+                    cache: 'no-store',
+                });
+                if (resp.ok) return true;
+            } catch (e) {
+                // fall through to socket fallback
+            }
+            if (socketConnected) {
+                socket.emit(event, data);
+                return true;
+            }
+            return false;
+        }
         socket.on("connect", () => {
             socketConnected = true;
             lastSocketFrameTs = Date.now();
@@ -330,8 +353,8 @@
             });
         });
 
-        function sendResetEnv() { socket.emit('reset_env'); };
-        function sendRestartMatch() { socket.emit('restart_match'); };
+        function sendResetEnv() { emitControl('reset_env', {}); };
+        function sendRestartMatch() { emitControl('restart_match', {}); };
 
         function readVec3(ids, fallback) {
             const out = [];
@@ -354,7 +377,7 @@
                 alert('Manual camera position must be numeric');
                 return;
             }
-            socket.emit('set_viewer_point', { point });
+            emitControl('set_viewer_point', { point });
         };
 
         function sendViewerLookAt() {
@@ -363,16 +386,16 @@
                 alert('Manual camera look-at must be numeric');
                 return;
             }
-            socket.emit('set_viewer_look_at', { point });
+            emitControl('set_viewer_look_at', { point });
         }
 
         function sendCameraPreset(presetName) {
             console.log("Sending camera preset:", presetName);
-            socket.emit('set_camera_preset', { preset: presetName });
+            emitControl('set_camera_preset', { preset: presetName });
         }
 
         function emitRobotVelocity(name, vx, vy, wz) {
-            socket.emit('set_robot_velocity', { name, vx, vy, wz });
+            emitControl('set_robot_velocity', { name, vx, vy, wz });
         }
 
         function setVelocityForRobot(name) {
@@ -776,6 +799,8 @@
         // --- Minimap Logic ---
         const canvas = document.getElementById('minimap');
         const ctx = canvas.getContext('2d');
+        canvas.style.touchAction = 'none';
+        canvas.style.userSelect = 'none';
 
         // Field Settings (dynamic from simulator _field metadata)
         let mapCfg = {
@@ -966,6 +991,15 @@
 
         let draggingEntity = null;
         let isRotating = false;
+        let dragInputMode = null; // 'pointer' | 'mouse' | 'touch' | null
+        const dragCounters = { down: 0, move: 0, up: 0 };
+
+        function updateDragDebug(extra = '') {
+            const el = document.getElementById('drag-debug');
+            if (!el) return;
+            const target = draggingEntity ? draggingEntity.name : '-';
+            el.textContent = `drag ${dragInputMode || 'idle'} d/m/u=${dragCounters.down}/${dragCounters.move}/${dragCounters.up} target=${target}${extra ? ' | ' + extra : ''}`;
+        }
 
         function toScreen(x_m, y_m) {
             return { x: CENTER_X + x_m * SCALE_X, y: CENTER_Y - y_m * SCALE_Y };
@@ -1080,71 +1114,184 @@
             });
         }
 
-        canvas.addEventListener('mousedown', (e) => {
+        let draggingPointerId = null;
+
+        function eventToCanvasPx(clientX, clientY) {
             const rect = canvas.getBoundingClientRect();
-            const mouseX = e.clientX - rect.left;
-            const mouseY = e.clientY - rect.top;
+            const sx = canvas.width / Math.max(1e-6, rect.width);
+            const sy = canvas.height / Math.max(1e-6, rect.height);
+            return {
+                x: (clientX - rect.left) * sx,
+                y: (clientY - rect.top) * sy,
+            };
+        }
 
-            // If shift held, we might be starting rotation? 
-            // Better logic: Click entity -> Drag.
-            // If Shift held while dragging -> Rotate.
-
+        function pickEntityAt(clientX, clientY) {
+            const p = eventToCanvasPx(clientX, clientY);
+            const mouseX = p.x;
+            const mouseY = p.y;
+            let bestEnt = null;
+            let bestDist = Infinity;
             for (let ent of entities) {
                 if (!ent.active && ent.name !== 'ball') continue;
                 const pos = toScreen(ent.x, ent.y);
                 const dist = Math.sqrt((mouseX - pos.x) ** 2 + (mouseY - pos.y) ** 2);
-                if (dist <= ent.r * 2.0) {
-                    draggingEntity = ent;
-                    break;
+                if (dist < bestDist) {
+                    bestDist = dist;
+                    bestEnt = ent;
                 }
             }
+            // Be tolerant to small canvas rendering scale; interactive map should feel easy to grab.
+            const pickRadius = 24.0;
+            return bestDist <= pickRadius ? bestEnt : null;
+        }
+
+        function updateDraggingEntity(clientX, clientY, shiftKey) {
+            if (!draggingEntity) return;
+            const p = eventToCanvasPx(clientX, clientY);
+            const mouseX = p.x;
+            const mouseY = p.y;
+            if (shiftKey) {
+                isRotating = true;
+                const entScreen = toScreen(draggingEntity.x, draggingEntity.y);
+                const dx = mouseX - entScreen.x;
+                const dy = mouseY - entScreen.y;
+                draggingEntity.theta = Math.atan2(-dy, dx);
+            } else {
+                isRotating = false;
+                const simPos = toSim(mouseX, mouseY);
+                draggingEntity.x = simPos.x;
+                draggingEntity.y = simPos.y;
+            }
+            drawMinimap();
+        }
+
+        canvas.addEventListener('pointerdown', (e) => {
+            if (dragInputMode && dragInputMode !== 'pointer') return;
+            const picked = pickEntityAt(e.clientX, e.clientY);
+            if (!picked) {
+                updateDragDebug('pointerdown miss');
+                return;
+            }
+            draggingEntity = picked;
+            draggingPointerId = e.pointerId;
+            dragInputMode = 'pointer';
+            dragCounters.down += 1;
+            updateDragDebug('pointerdown');
+            try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
+            e.preventDefault();
+        });
+
+        canvas.addEventListener('pointermove', (e) => {
+            if (dragInputMode !== 'pointer') return;
+            if (!draggingEntity) return;
+            if (draggingPointerId !== null && e.pointerId !== draggingPointerId) return;
+            dragCounters.move += 1;
+            updateDraggingEntity(e.clientX, e.clientY, e.shiftKey);
+            updateDragDebug('pointermove');
+            e.preventDefault();
+        });
+
+        async function commitDraggingEntityTeleport() {
+            if (!draggingEntity) return;
+            const payload = {
+                name: draggingEntity.name,
+                x: draggingEntity.x,
+                y: draggingEntity.y,
+                theta: draggingEntity.theta
+            };
+            console.log(
+                `Teleporting ${payload.name} to (${payload.x.toFixed(2)}, ${payload.y.toFixed(2)}, th=${payload.theta.toFixed(2)})`
+            );
+            const ok = await emitControl('teleport_entity', payload);
+            if (!ok) {
+                setConnStatus('control send failed');
+            }
+            draggingEntity = null;
+            isRotating = false;
+        }
+
+        async function endPointerDrag(e) {
+            if (dragInputMode !== 'pointer') return;
+            if (draggingPointerId !== null && e.pointerId !== draggingPointerId) return;
+            try { canvas.releasePointerCapture(e.pointerId); } catch (_) {}
+            draggingPointerId = null;
+            dragInputMode = null;
+            dragCounters.up += 1;
+            updateDragDebug('pointerup');
+            await commitDraggingEntityTeleport();
+        }
+
+        canvas.addEventListener('pointerup', endPointerDrag);
+        canvas.addEventListener('pointercancel', endPointerDrag);
+
+        // Mouse fallback for environments that do not emit pointer events.
+        canvas.addEventListener('mousedown', (e) => {
+            if (dragInputMode && dragInputMode !== 'mouse') return;
+            const picked = pickEntityAt(e.clientX, e.clientY);
+            if (!picked) {
+                updateDragDebug('mousedown miss');
+                return;
+            }
+            draggingEntity = picked;
+            dragInputMode = 'mouse';
+            dragCounters.down += 1;
+            updateDragDebug('mousedown');
+            e.preventDefault();
         });
 
         canvas.addEventListener('mousemove', (e) => {
-            if (draggingEntity) {
-                const rect = canvas.getBoundingClientRect();
-                const mouseX = e.clientX - rect.left;
-                const mouseY = e.clientY - rect.top;
-
-                if (e.shiftKey) {
-                    // Rotating mode
-                    isRotating = true;
-                    // Calculate angle from entity center to mouse
-                    const entScreen = toScreen(draggingEntity.x, draggingEntity.y);
-                    const dx = mouseX - entScreen.x;
-                    const dy = mouseY - entScreen.y;
-                    // Screen coords: Y down. Sim coords: Y up.
-                    // Angle in screen: atan2(dy, dx).
-                    // We need to map this to Sim Theta.
-                    // dx > 0 -> Sim X > 0. dy > 0 -> Sim Y < 0.
-                    // So sim_dy = -dy.
-                    const sim_dx = dx;
-                    const sim_dy = -dy;
-                    draggingEntity.theta = Math.atan2(sim_dy, sim_dx);
-                } else {
-                    // Translating mode
-                    isRotating = false;
-                    const simPos = toSim(mouseX, mouseY);
-                    draggingEntity.x = simPos.x; draggingEntity.y = simPos.y;
-                }
-                drawMinimap();
-            }
+            if (dragInputMode !== 'mouse') return;
+            if (!draggingEntity) return;
+            dragCounters.move += 1;
+            updateDraggingEntity(e.clientX, e.clientY, e.shiftKey);
+            updateDragDebug('mousemove');
+            e.preventDefault();
         });
 
-        canvas.addEventListener('mouseup', (e) => {
-            if (draggingEntity) {
-                console.log(`Teleporting ${draggingEntity.name} to (${draggingEntity.x.toFixed(2)}, ${draggingEntity.y.toFixed(2)}, th=${draggingEntity.theta.toFixed(2)})`);
-                // Omit Z to let backend use default/current height
-                socket.emit('teleport_entity', {
-                    name: draggingEntity.name,
-                    x: draggingEntity.x,
-                    y: draggingEntity.y,
-                    theta: draggingEntity.theta
-                });
-                draggingEntity = null;
-                isRotating = false;
-            }
+        window.addEventListener('mouseup', async () => {
+            if (dragInputMode !== 'mouse') return;
+            dragCounters.up += 1;
+            dragInputMode = null;
+            updateDragDebug('mouseup');
+            await commitDraggingEntityTeleport();
         });
+
+        // Touch fallback for mobile-like browser engines.
+        canvas.addEventListener('touchstart', (e) => {
+            if (dragInputMode && dragInputMode !== 'touch') return;
+            const t = e.touches && e.touches[0];
+            if (!t) return;
+            const picked = pickEntityAt(t.clientX, t.clientY);
+            if (!picked) {
+                updateDragDebug('touchstart miss');
+                return;
+            }
+            draggingEntity = picked;
+            dragInputMode = 'touch';
+            dragCounters.down += 1;
+            updateDragDebug('touchstart');
+            e.preventDefault();
+        }, { passive: false });
+
+        canvas.addEventListener('touchmove', (e) => {
+            if (dragInputMode !== 'touch') return;
+            if (!draggingEntity) return;
+            const t = e.touches && e.touches[0];
+            if (!t) return;
+            dragCounters.move += 1;
+            updateDraggingEntity(t.clientX, t.clientY, false);
+            updateDragDebug('touchmove');
+            e.preventDefault();
+        }, { passive: false });
+
+        window.addEventListener('touchend', async () => {
+            if (dragInputMode !== 'touch') return;
+            dragCounters.up += 1;
+            dragInputMode = null;
+            updateDragDebug('touchend');
+            await commitDraggingEntityTeleport();
+        }, { passive: false });
 
         // --- Robot States Sync from Backend ---
         socket.on('field_meta', function (meta) {
