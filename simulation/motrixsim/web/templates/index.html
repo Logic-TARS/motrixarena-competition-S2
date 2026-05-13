@@ -993,6 +993,7 @@
         let isRotating = false;
         let dragInputMode = null; // 'pointer' | 'mouse' | 'touch' | null
         const dragCounters = { down: 0, move: 0, up: 0 };
+        let lastPickDistancePx = NaN;
 
         function updateDragDebug(extra = '') {
             const el = document.getElementById('drag-debug');
@@ -1130,20 +1131,36 @@
             const p = eventToCanvasPx(clientX, clientY);
             const mouseX = p.x;
             const mouseY = p.y;
-            let bestEnt = null;
-            let bestDist = Infinity;
-            for (let ent of entities) {
-                if (!ent.active && ent.name !== 'ball') continue;
+            let nearestDist = Infinity;
+            let pickedEnt = null;
+            let pickedScore = Infinity;
+            const candidates = entities.filter(ent => ent.active || ent.name === 'ball');
+            for (let ent of candidates) {
                 const pos = toScreen(ent.x, ent.y);
                 const dist = Math.sqrt((mouseX - pos.x) ** 2 + (mouseY - pos.y) ** 2);
-                if (dist < bestDist) {
-                    bestDist = dist;
-                    bestEnt = ent;
+                if (dist < nearestDist) {
+                    nearestDist = dist;
+                }
+                // Very strict hitbox to avoid any "magnet" behavior on blank clicks.
+                // Robot: basically on-circle; Ball: slightly larger for easier picking.
+                const pickRadius = (ent.name === 'ball') ? (ent.r + 1.0) : Math.max(4.0, ent.r * 0.85);
+                if (dist <= pickRadius) {
+                    const score = dist / Math.max(1e-6, pickRadius);
+                    if (score < pickedScore) {
+                        pickedScore = score;
+                        pickedEnt = ent;
+                    }
                 }
             }
-            // Be tolerant to small canvas rendering scale; interactive map should feel easy to grab.
-            const pickRadius = 24.0;
-            return bestDist <= pickRadius ? bestEnt : null;
+            lastPickDistancePx = nearestDist;
+            return pickedEnt;
+        }
+
+        function clearDragState() {
+            draggingEntity = null;
+            isRotating = false;
+            draggingPointerId = null;
+            dragInputMode = null;
         }
 
         function updateDraggingEntity(clientX, clientY, shiftKey) {
@@ -1170,14 +1187,15 @@
             if (dragInputMode && dragInputMode !== 'pointer') return;
             const picked = pickEntityAt(e.clientX, e.clientY);
             if (!picked) {
-                updateDragDebug('pointerdown miss');
+                clearDragState();
+                updateDragDebug(`pointerdown miss nearest=${Number.isFinite(lastPickDistancePx) ? lastPickDistancePx.toFixed(1) : '-'}`);
                 return;
             }
             draggingEntity = picked;
             draggingPointerId = e.pointerId;
             dragInputMode = 'pointer';
             dragCounters.down += 1;
-            updateDragDebug('pointerdown');
+            updateDragDebug(`pointerdown ${picked.name} d=${Number.isFinite(lastPickDistancePx) ? lastPickDistancePx.toFixed(1) : '-'}`);
             try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
             e.preventDefault();
         });
@@ -1230,13 +1248,14 @@
             if (dragInputMode && dragInputMode !== 'mouse') return;
             const picked = pickEntityAt(e.clientX, e.clientY);
             if (!picked) {
-                updateDragDebug('mousedown miss');
+                clearDragState();
+                updateDragDebug(`mousedown miss nearest=${Number.isFinite(lastPickDistancePx) ? lastPickDistancePx.toFixed(1) : '-'}`);
                 return;
             }
             draggingEntity = picked;
             dragInputMode = 'mouse';
             dragCounters.down += 1;
-            updateDragDebug('mousedown');
+            updateDragDebug(`mousedown ${picked.name} d=${Number.isFinite(lastPickDistancePx) ? lastPickDistancePx.toFixed(1) : '-'}`);
             e.preventDefault();
         });
 
@@ -1264,13 +1283,14 @@
             if (!t) return;
             const picked = pickEntityAt(t.clientX, t.clientY);
             if (!picked) {
-                updateDragDebug('touchstart miss');
+                clearDragState();
+                updateDragDebug(`touchstart miss nearest=${Number.isFinite(lastPickDistancePx) ? lastPickDistancePx.toFixed(1) : '-'}`);
                 return;
             }
             draggingEntity = picked;
             dragInputMode = 'touch';
             dragCounters.down += 1;
-            updateDragDebug('touchstart');
+            updateDragDebug(`touchstart ${picked.name} d=${Number.isFinite(lastPickDistancePx) ? lastPickDistancePx.toFixed(1) : '-'}`);
             e.preventDefault();
         }, { passive: false });
 
@@ -1292,6 +1312,11 @@
             updateDragDebug('touchend');
             await commitDraggingEntityTeleport();
         }, { passive: false });
+
+        window.addEventListener('blur', () => {
+            clearDragState();
+            updateDragDebug('window blur');
+        });
 
         // --- Robot States Sync from Backend ---
         socket.on('field_meta', function (meta) {
