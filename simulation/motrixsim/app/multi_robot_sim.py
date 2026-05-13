@@ -98,6 +98,20 @@ def _mtx_joint_qvel_start(model: mtx.SceneModel, joint_name: str) -> int:
     return int(model.joint_dof_vel_indices[ji])
 
 
+def _mtx_joint_limit_range(model: mtx.SceneModel, joint_name: str) -> tuple[float, float]:
+    """
+    Return Motrix joint limit (lower, upper). Falls back to no-limit if unavailable.
+    """
+    ji = _mtx_resolve_joint_index(model, joint_name)
+    joints = getattr(model, "joints", ()) or ()
+    if ji < 0 or ji >= len(joints):
+        return -np.inf, np.inf
+    rng = np.asarray(getattr(joints[ji], "range", []), dtype=np.float64).reshape(-1)
+    if rng.size >= 2 and np.isfinite(rng[0]) and np.isfinite(rng[1]) and rng[0] < rng[1]:
+        return float(rng[0]), float(rng[1])
+    return -np.inf, np.inf
+
+
 def _mtx_actuator_index(model: mtx.SceneModel, actuator_name: str) -> int:
     a = model.get_actuator_index(actuator_name)
     if a is not None:
@@ -1368,6 +1382,10 @@ class RobotSpec:
     pi_mujoco_to_isaac_idx: np.ndarray | None = None
     pi_filtered_dof_target: np.ndarray | None = None
     pi_target_dof_pos: np.ndarray | None = None
+    joint_lower: np.ndarray | None = None
+    joint_upper: np.ndarray | None = None
+    pi_joint_lower_mujoco: np.ndarray | None = None
+    pi_joint_upper_mujoco: np.ndarray | None = None
 
 
 class MultiRobotMotrixSim:
@@ -1494,6 +1512,7 @@ class MultiRobotMotrixSim:
         self._robot_protect_pose: dict[int, tuple[float, float, float]] = {}
         self._robot_cmd_zero_frames_left: dict[int, int] = {}
         self._fall_candidate_frames: dict[int, int] = {}
+        self._enable_fall_recovery = True
         self._ball_last_touch_rid: int | None = None
 
         self.use_referee = bool(args.use_referee)
@@ -1595,10 +1614,15 @@ class MultiRobotMotrixSim:
             pref_joints = [f"{name}__{j}" for j in joint_names]
             qpos_idx = []
             qvel_idx = []
+            joint_lower = []
+            joint_upper = []
             for jn in pref_joints:
                 try:
                     qpos_idx.append(_mtx_joint_qpos_start(self.model, jn))
                     qvel_idx.append(_mtx_joint_qvel_start(self.model, jn))
+                    lo, hi = _mtx_joint_limit_range(self.model, jn)
+                    joint_lower.append(lo)
+                    joint_upper.append(hi)
                 except Exception as e:
                     raise RuntimeError(f"Missing policy joint: {jn}") from e
 
@@ -1639,6 +1663,8 @@ class MultiRobotMotrixSim:
             pi_mujoco_to_isaac_idx = None
             pi_filtered_dof_target = None
             pi_target_dof_pos = None
+            pi_joint_lower_mujoco = None
+            pi_joint_upper_mujoco = None
 
             if self.robot_cfg.robot_type == PI_PLUS_ROBOT_TYPE:
                 if len(joint_names) != len(PI_PLUS_KP_POLICY_ORDER) or len(joint_names) != len(PI_PLUS_KD_POLICY_ORDER):
@@ -1649,16 +1675,23 @@ class MultiRobotMotrixSim:
                 pi_qpos = []
                 pi_qvel = []
                 pi_act = []
+                pi_lower = []
+                pi_upper = []
                 for jn in pi_pref_joints:
                     try:
                         pi_qpos.append(_mtx_joint_qpos_start(self.model, jn))
                         pi_qvel.append(_mtx_joint_qvel_start(self.model, jn))
                         pi_act.append(_mtx_actuator_index(self.model, jn))
+                        lo, hi = _mtx_joint_limit_range(self.model, jn)
+                        pi_lower.append(lo)
+                        pi_upper.append(hi)
                     except Exception as e:
                         raise RuntimeError(f"Missing pi_plus mujoco-order joint/actuator: {jn}") from e
                 pi_qpos_idx_mujoco = np.asarray(pi_qpos, dtype=np.int32)
                 pi_qvel_idx_mujoco = np.asarray(pi_qvel, dtype=np.int32)
                 pi_act_idx_mujoco = np.asarray(pi_act, dtype=np.int32)
+                pi_joint_lower_mujoco = np.asarray(pi_lower, dtype=np.float32)
+                pi_joint_upper_mujoco = np.asarray(pi_upper, dtype=np.float32)
                 pi_default_dof_pos = PI_PLUS_DEFAULT_DOF_POS_MUJOCO.copy()
                 pi_isaac_to_mujoco_idx = PI_PLUS_ISAAC_TO_MUJOCO_IDX.copy()
                 pi_mujoco_to_isaac_idx = PI_PLUS_MUJOCO_TO_ISAAC_IDX.copy()
@@ -1701,6 +1734,10 @@ class MultiRobotMotrixSim:
                 pi_mujoco_to_isaac_idx=pi_mujoco_to_isaac_idx,
                 pi_filtered_dof_target=pi_filtered_dof_target,
                 pi_target_dof_pos=pi_target_dof_pos,
+                joint_lower=np.asarray(joint_lower, dtype=np.float32),
+                joint_upper=np.asarray(joint_upper, dtype=np.float32),
+                pi_joint_lower_mujoco=pi_joint_lower_mujoco,
+                pi_joint_upper_mujoco=pi_joint_upper_mujoco,
             )
         return specs
 
@@ -1872,6 +1909,13 @@ class MultiRobotMotrixSim:
                         spec.pi_filtered_dof_target[:] = spec.pi_filtered_dof_target * 0.2 + target_dof_pos * 0.8
                     else:
                         spec.pi_filtered_dof_target[:] = target_dof_pos
+                    if spec.pi_joint_lower_mujoco is not None and spec.pi_joint_upper_mujoco is not None:
+                        np.clip(
+                            spec.pi_filtered_dof_target,
+                            spec.pi_joint_lower_mujoco,
+                            spec.pi_joint_upper_mujoco,
+                            out=spec.pi_filtered_dof_target,
+                        )
                     spec.pi_target_dof_pos[:] = spec.pi_filtered_dof_target
                     # Keep legacy buffers coherent (policy order) for debug/reset consistency.
                     spec.target_joint_pos[:] = spec.pi_target_dof_pos[spec.pi_mujoco_to_isaac_idx]
@@ -1884,6 +1928,8 @@ class MultiRobotMotrixSim:
                         spec.filtered_dof_target[:] = spec.filtered_dof_target * 0.2 + joint_pos_action * 0.8
                     else:
                         spec.filtered_dof_target[:] = joint_pos_action
+                    if spec.joint_lower is not None and spec.joint_upper is not None:
+                        np.clip(spec.filtered_dof_target, spec.joint_lower, spec.joint_upper, out=spec.filtered_dof_target)
                     spec.target_joint_pos[:] = spec.filtered_dof_target
 
         if (
@@ -1956,11 +2002,13 @@ class MultiRobotMotrixSim:
             # Keep process alive and preserve current state/teleport commands.
             # Full reset here makes interactive controls appear ineffective.
             return counter + 1
+        if self._enforce_joint_state_limits():
+            self.model.forward_kinematic(self.data)
         self._update_referee(self.sim_dt)
         post_hold_changed = self._apply_robot_protection_holds()
         if post_hold_changed:
             self.model.forward_kinematic(self.data)
-        fall_recovered = self._recover_fallen_robots()
+        fall_recovered = self._recover_fallen_robots() if self._enable_fall_recovery else False
         if fall_recovered:
             self.model.forward_kinematic(self.data)
         if (
@@ -1971,6 +2019,69 @@ class MultiRobotMotrixSim:
             self.reset(preserve_ball=True)
             return 0
         return counter + 1
+
+    def _enforce_joint_state_limits(self) -> bool:
+        changed = False
+        for spec in self.robot_specs.values():
+            use_pi = (
+                self.robot_cfg.robot_type == PI_PLUS_ROBOT_TYPE
+                and spec.pi_qpos_idx_mujoco is not None
+                and spec.pi_qvel_idx_mujoco is not None
+                and spec.pi_act_idx_mujoco is not None
+                and spec.pi_joint_lower_mujoco is not None
+                and spec.pi_joint_upper_mujoco is not None
+            )
+            if use_pi:
+                q_idx = spec.pi_qpos_idx_mujoco
+                v_idx = spec.pi_qvel_idx_mujoco
+                a_idx = spec.pi_act_idx_mujoco
+                lower = spec.pi_joint_lower_mujoco
+                upper = spec.pi_joint_upper_mujoco
+            else:
+                if spec.joint_lower is None or spec.joint_upper is None:
+                    continue
+                q_idx = spec.qpos_idx
+                v_idx = spec.qvel_idx
+                a_idx = spec.act_idx
+                lower = spec.joint_lower
+                upper = spec.joint_upper
+
+            q = np.asarray(self.data.dof_pos[0, q_idx], dtype=np.float32)
+            q_clip = np.clip(q, lower, upper)
+            hit = np.abs(q - q_clip) > 1e-5
+            if not np.any(hit):
+                continue
+            applied = False
+            try:
+                rb = self.model.get_body(spec.name)
+                if rb is not None:
+                    pos_idx = np.asarray(rb.get_dof_pos_indices(include_floatingbase=True), dtype=np.int64).reshape(-1)
+                    vel_idx = np.asarray(rb.get_dof_vel_indices(include_floatingbase=True), dtype=np.int64).reshape(-1)
+                    if pos_idx.size > 0 and vel_idx.size > 0:
+                        q_all = np.asarray(self.data.dof_pos[0, pos_idx], dtype=np.float32).copy()
+                        v_all = np.asarray(self.data.dof_vel[0, vel_idx], dtype=np.float32).copy()
+                        for j, gq in enumerate(np.asarray(q_idx, dtype=np.int64)):
+                            q_loc = np.where(pos_idx == gq)[0]
+                            if q_loc.size > 0:
+                                q_all[int(q_loc[0])] = float(q_clip[j])
+                            if hit[j]:
+                                gv = int(np.asarray(v_idx, dtype=np.int64)[j])
+                                v_loc = np.where(vel_idx == gv)[0]
+                                if v_loc.size > 0:
+                                    v_all[int(v_loc[0])] = 0.0
+                        rb.set_dof_pos(self.data, q_all)
+                        rb.set_dof_vel(self.data, v_all)
+                        applied = True
+            except Exception:
+                applied = False
+
+            if not applied:
+                # Fallback path for environments where body-level set_* is unavailable.
+                self.data.dof_pos[0, q_idx] = q_clip
+                self.data.dof_vel[0, v_idx[hit]] = 0.0
+            self.data.actuator_ctrls[0, a_idx[hit]] = 0.0
+            changed = True
+        return changed
 
     def _detect_ball_contact_rid(self) -> int | None:
         if self._ball_geom_contact_pairs.size == 0:
@@ -1994,6 +2105,14 @@ class MultiRobotMotrixSim:
         now = time.monotonic()
         for rid, spec in self.robot_specs.items():
             if self._is_robot_protected(rid):
+                self._fall_candidate_frames[rid] = 0
+                continue
+            base_z = float(self.data.dof_pos[0, spec.base_qpos_adr + 2])
+            startup_z = float(self._startup_qpos[spec.base_qpos_adr + 2])
+            # Only trigger auto-recovery when the robot is both tilted and clearly low.
+            # This avoids repeated false recoveries for walking/leaning states.
+            low_z_gate = max(0.45, startup_z - 0.25)
+            if not np.isfinite(base_z) or base_z > low_z_gate:
                 self._fall_candidate_frames[rid] = 0
                 continue
             quat = self.data.dof_pos[0][spec.base_qpos_adr + 3 : spec.base_qpos_adr + 7]
@@ -2062,8 +2181,8 @@ class MultiRobotMotrixSim:
             return
         qpos_adr = int(self._ball_qpos_adr)
         qvel_adr = int(self._ball_qvel_adr)
-        self.data.dof_pos[0][qpos_adr : qpos_adr + 7] = state["qpos"]
-        self.data.dof_vel[0][qvel_adr : qvel_adr + 6] = state["qvel"]
+        self.data.dof_pos[0, qpos_adr : qpos_adr + 7] = state["qpos"]
+        self.data.dof_vel[0, qvel_adr : qvel_adr + 6] = state["qvel"]
 
     def _restore_all_robot_states(self, states):
         if not states:
@@ -2072,22 +2191,22 @@ class MultiRobotMotrixSim:
             spec = self.robot_specs.get(rid)
             if spec is None:
                 continue
-            self.data.dof_pos[0][spec.base_qpos_adr : spec.base_qpos_adr + 7] = state["base_qpos"]
-            self.data.dof_vel[0][spec.base_qvel_adr : spec.base_qvel_adr + 6] = state["base_qvel"]
-            self.data.dof_pos[0][spec.qpos_idx] = state["joint_qpos"]
-            self.data.dof_vel[0][spec.qvel_idx] = state["joint_qvel"]
+            self.data.dof_pos[0, spec.base_qpos_adr : spec.base_qpos_adr + 7] = state["base_qpos"]
+            self.data.dof_vel[0, spec.base_qvel_adr : spec.base_qvel_adr + 6] = state["base_qvel"]
+            self.data.dof_pos[0, spec.qpos_idx] = state["joint_qpos"]
+            self.data.dof_vel[0, spec.qvel_idx] = state["joint_qvel"]
 
     def _reset_one_robot(self, spec: RobotSpec):
-        self.data.dof_pos[0][spec.base_qpos_adr : spec.base_qpos_adr + 7] = self._startup_qpos[spec.base_qpos_adr : spec.base_qpos_adr + 7]
-        self.data.dof_vel[0][spec.base_qvel_adr : spec.base_qvel_adr + 6] = self._startup_qvel[spec.base_qvel_adr : spec.base_qvel_adr + 6]
-        self.data.dof_pos[0][spec.qpos_idx] = self._startup_qpos[spec.qpos_idx]
-        self.data.dof_vel[0][spec.qvel_idx] = self._startup_qvel[spec.qvel_idx]
+        self.data.dof_pos[0, spec.base_qpos_adr : spec.base_qpos_adr + 7] = self._startup_qpos[spec.base_qpos_adr : spec.base_qpos_adr + 7]
+        self.data.dof_vel[0, spec.base_qvel_adr : spec.base_qvel_adr + 6] = self._startup_qvel[spec.base_qvel_adr : spec.base_qvel_adr + 6]
+        self.data.dof_pos[0, spec.qpos_idx] = self._startup_qpos[spec.qpos_idx]
+        self.data.dof_vel[0, spec.qvel_idx] = self._startup_qvel[spec.qvel_idx]
         if spec.pi_qpos_idx_mujoco is not None and spec.pi_qvel_idx_mujoco is not None:
-            self.data.dof_pos[0][spec.pi_qpos_idx_mujoco] = self._startup_qpos[spec.pi_qpos_idx_mujoco]
-            self.data.dof_vel[0][spec.pi_qvel_idx_mujoco] = self._startup_qvel[spec.pi_qvel_idx_mujoco]
-        self.data.actuator_ctrls[0][spec.act_idx] = self._startup_ctrl[spec.act_idx]
+            self.data.dof_pos[0, spec.pi_qpos_idx_mujoco] = self._startup_qpos[spec.pi_qpos_idx_mujoco]
+            self.data.dof_vel[0, spec.pi_qvel_idx_mujoco] = self._startup_qvel[spec.pi_qvel_idx_mujoco]
+        self.data.actuator_ctrls[0, spec.act_idx] = self._startup_ctrl[spec.act_idx]
         if spec.pi_act_idx_mujoco is not None:
-            self.data.actuator_ctrls[0][spec.pi_act_idx_mujoco] = self._startup_ctrl[spec.pi_act_idx_mujoco]
+            self.data.actuator_ctrls[0, spec.pi_act_idx_mujoco] = self._startup_ctrl[spec.pi_act_idx_mujoco]
         spec.last_action[:] = 0.0
         spec.filtered_dof_target[:] = spec.init_angles
         spec.target_joint_pos[:] = spec.init_angles
@@ -2096,6 +2215,10 @@ class MultiRobotMotrixSim:
             spec.pi_target_dof_pos[:] = spec.pi_default_dof_pos
 
     def _hold_robot_at_reset_pose(self, spec: RobotSpec, x: float, y: float, theta: float):
+        # Keep current base height to avoid repeated "lift then drop" energy injection.
+        cur_z = float(self.data.dof_pos[0, spec.base_qpos_adr + 2])
+        if not np.isfinite(cur_z):
+            cur_z = float(self._startup_qpos[spec.base_qpos_adr + 2])
         applied = False
         try:
             rb = self.model.get_body(spec.name)
@@ -2107,6 +2230,7 @@ class MultiRobotMotrixSim:
                     v = self._startup_qvel[vel_idx].copy()
                     q[0] = float(x)
                     q[1] = float(y)
+                    q[2] = cur_z
                     q[3:7] = _quat_xyzw_from_yaw(float(theta))
                     v[:6] = 0.0
                     rb.set_dof_pos(self.data, q)
@@ -2118,6 +2242,7 @@ class MultiRobotMotrixSim:
             self._reset_one_robot(spec)
             self.data.dof_pos[0, spec.base_qpos_adr + 0] = float(x)
             self.data.dof_pos[0, spec.base_qpos_adr + 1] = float(y)
+            self.data.dof_pos[0, spec.base_qpos_adr + 2] = cur_z
             self.data.dof_pos[0, spec.base_qpos_adr + 3 : spec.base_qpos_adr + 7] = _quat_xyzw_from_yaw(float(theta))
             self.data.dof_vel[0, spec.base_qvel_adr : spec.base_qvel_adr + 6] = 0.0
         self.command_buffer[spec.rid] = np.array(DEFAULT_CMD, dtype=np.float32)
@@ -2156,9 +2281,9 @@ class MultiRobotMotrixSim:
     def reset(self, preserve_ball: bool = True, reset_referee: bool = True):
         ball_state = self._get_ball_state() if preserve_ball else None
         self.data = mtx.SceneData(self.model, batch=[1])
-        self.data.dof_pos[0][:] = self._startup_qpos
-        self.data.dof_vel[0][:] = self._startup_qvel
-        self.data.actuator_ctrls[0][:] = self._startup_ctrl
+        self.data.dof_pos[0, :] = self._startup_qpos
+        self.data.dof_vel[0, :] = self._startup_qvel
+        self.data.actuator_ctrls[0, :] = self._startup_ctrl
         self._apply_saved_spawn_points()
         self._restore_ball_state(ball_state)
         for spec in self.robot_specs.values():
