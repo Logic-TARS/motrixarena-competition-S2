@@ -2800,9 +2800,11 @@ class MultiRobotMotrixSim:
                 else:
                     time.sleep(0)
                 if webview is not None:
-                    # Always yield a little time slice so Flask-SocketIO thread can serve
-                    # /api/states, /api/frame.jpg and socket heartbeats reliably.
-                    time.sleep(0.001)
+                    # Yield a little time for Flask/SocketIO only when we are still inside the physics
+                    # budget. When compute-bound, an unconditional sleep would slow wall-clock sim further.
+                    slack = float(self.model.options.timestep) - (time.time() - step_start)
+                    if slack > 0.002:
+                        time.sleep(0.001)
         finally:
             socket.close()
             context.term()
@@ -2827,6 +2829,8 @@ def run_sim(args: RuntimeArgs, template_dir: Path):
         webview = MujocoLabWebView(
             template_dir=template_dir,
             allow_keyboard_control=args.allow_keyboard_control,
+            web_jpeg_quality=args.web_jpeg_quality,
+            web_jpeg_subsampling=args.web_jpeg_subsampling,
         )
         webview.start(port=args.webview_port)
         # Let the Flask/Socket.IO thread bind before we broadcast field_meta from the main thread.

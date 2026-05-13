@@ -166,6 +166,8 @@ class StartSimRequest(BaseModel):
     web_fps: int = Field(default=20, ge=1, le=120)
     web_width: int = Field(default=1280, ge=64, le=8192)
     web_height: int = Field(default=720, ge=64, le=8192)
+    web_jpeg_quality: int = Field(default=82, ge=1, le=95)
+    web_jpeg_subsampling: int = Field(default=2, ge=0, le=2)
     allow_keyboard_control: bool = False
     robot_type: str = Field(default="k1", pattern="^(k1|pi_plus)$")
     policy_device: str = Field(default="gpu", pattern="^(cpu|gpu)$")
@@ -256,6 +258,10 @@ class SimManager:
             str(req.web_width),
             "--web-height",
             str(req.web_height),
+            "--web-jpeg-quality",
+            str(req.web_jpeg_quality),
+            "--web-jpeg-subsampling",
+            str(req.web_jpeg_subsampling),
             "--policy-device",
             req.policy_device,
         ]

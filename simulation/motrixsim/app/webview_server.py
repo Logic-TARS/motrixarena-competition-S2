@@ -34,6 +34,34 @@ def _log_emit_throttled(key: str, msg: str, interval_sec: float = 2.0) -> None:
         print(msg)
 
 
+def _jpeg_worker_main(
+    in_q: queue.Queue,
+    event_q: mp.Queue,
+    quality: int,
+    subsampling: int,
+    stop_ev: threading.Event,
+) -> None:
+    """Encode RGB frames off the simulation thread so physics stepping is not blocked by PIL."""
+    q = max(1, min(95, int(quality)))
+    sub = max(0, min(2, int(subsampling)))
+    while not stop_ev.is_set():
+        try:
+            arr = in_q.get(timeout=0.05)
+        except queue.Empty:
+            continue
+        if arr is None:
+            break
+        try:
+            if not isinstance(arr, np.ndarray) or arr.ndim != 3 or arr.shape[2] != 3:
+                continue
+            image = Image.fromarray(arr, mode="RGB")
+            bio = BytesIO()
+            image.save(bio, format="JPEG", quality=q, subsampling=sub)
+            _queue_put_latest(event_q, {"type": "frame", "jpeg": bio.getvalue()}, max_drop=32)
+        except Exception as e:
+            _log_emit_throttled("jpeg_worker", f"[MujocoWebView] jpeg worker: {e}")
+
+
 def _socket_json_safe(obj: Any) -> Any:
     """Ensure payloads are JSON-serializable for Engine.IO (no numpy scalars/arrays)."""
     if obj is None or isinstance(obj, (bool, str)):
@@ -303,10 +331,19 @@ def _run_webview_process(
 
 
 class MujocoLabWebView:
-    def __init__(self, template_dir: Path, allow_keyboard_control: bool = False):
+    def __init__(
+        self,
+        template_dir: Path,
+        allow_keyboard_control: bool = False,
+        *,
+        web_jpeg_quality: int = 82,
+        web_jpeg_subsampling: int = 2,
+    ):
         self.template_dir = Path(template_dir)
         self.msg = WebMsgBuffer()
         self.allow_keyboard_control = bool(allow_keyboard_control)
+        self._web_jpeg_quality = int(web_jpeg_quality)
+        self._web_jpeg_subsampling = int(web_jpeg_subsampling)
         self._field_meta: dict[str, Any] | None = None
         self._ctx = mp.get_context("spawn")
         self._command_q: mp.Queue | None = None
@@ -316,6 +353,9 @@ class MujocoLabWebView:
         self._proc: mp.Process | None = None
         self._command_file: Path | None = None
         self._command_file_pos: int = 0
+        self._jpeg_in_q: queue.Queue | None = None
+        self._jpeg_thread: threading.Thread | None = None
+        self._jpeg_stop: threading.Event | None = None
 
     def start(self, port: int = 5811):
         if self._proc is not None and self._proc.is_alive():
@@ -329,6 +369,21 @@ class MujocoLabWebView:
             self._command_file.write_text("", encoding="utf-8")
         except Exception:
             pass
+        self._jpeg_stop = threading.Event()
+        self._jpeg_in_q = queue.Queue(maxsize=2)
+        self._jpeg_thread = threading.Thread(
+            target=_jpeg_worker_main,
+            args=(
+                self._jpeg_in_q,
+                self._event_q,
+                self._web_jpeg_quality,
+                self._web_jpeg_subsampling,
+                self._jpeg_stop,
+            ),
+            name="motrix-webview-jpeg",
+            daemon=True,
+        )
+        self._jpeg_thread.start()
         self._proc = self._ctx.Process(
             target=_run_webview_process,
             args=(
@@ -426,7 +481,7 @@ class MujocoLabWebView:
 
     def emit_frame(self, rgb: np.ndarray):
         try:
-            if self._event_q is None:
+            if self._event_q is None or self._jpeg_in_q is None:
                 return
             arr = np.ascontiguousarray(rgb)
             if arr.dtype != np.uint8:
@@ -435,12 +490,18 @@ class MujocoLabWebView:
                 arr = arr[:, :, :3]
             if arr.ndim != 3 or arr.shape[2] != 3:
                 raise ValueError(f"expected HxWx3 RGB uint8, got shape={getattr(arr, 'shape', None)} dtype={arr.dtype}")
-            image = Image.fromarray(arr, mode="RGB")
-            bio = BytesIO()
-            # High-clarity profile: keep more detail in each frame.
-            image.save(bio, format="JPEG", quality=92, subsampling=0)
-            jpeg_bytes = bio.getvalue()
-            _queue_put_latest(self._event_q, {"type": "frame", "jpeg": jpeg_bytes}, max_drop=32)
+            frame = np.array(arr, copy=True, dtype=np.uint8, order="C")
+            try:
+                self._jpeg_in_q.put_nowait(frame)
+            except queue.Full:
+                try:
+                    _ = self._jpeg_in_q.get_nowait()
+                except queue.Empty:
+                    pass
+                try:
+                    self._jpeg_in_q.put_nowait(frame)
+                except queue.Full:
+                    pass
         except Exception as e:
             _log_emit_throttled("emit_frame", f"[MujocoWebView] emit_frame failed: {e}")
 
@@ -465,6 +526,17 @@ class MujocoLabWebView:
 
     def close(self) -> None:
         try:
+            if self._jpeg_in_q is not None and self._jpeg_stop is not None:
+                self._jpeg_stop.set()
+                try:
+                    self._jpeg_in_q.put_nowait(None)
+                except Exception:
+                    pass
+                if self._jpeg_thread is not None:
+                    self._jpeg_thread.join(timeout=1.5)
+                self._jpeg_in_q = None
+                self._jpeg_thread = None
+                self._jpeg_stop = None
             if self._event_q is not None:
                 _queue_put_latest(self._event_q, {"type": "shutdown"}, max_drop=1)
                 try:

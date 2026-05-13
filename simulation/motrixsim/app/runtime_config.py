@@ -278,6 +278,8 @@ class RuntimeArgs:
     web_fps: int
     web_width: int
     web_height: int
+    web_jpeg_quality: int
+    web_jpeg_subsampling: int
     render_collision_meshes: bool
     allow_keyboard_control: bool
     port: int
@@ -391,6 +393,19 @@ def parse_runtime_args(mujoco_dir: Path) -> RuntimeArgs:
     parser.add_argument("--web-width", type=int, default=1280)
     parser.add_argument("--web-height", type=int, default=720)
     parser.add_argument(
+        "--web-jpeg-quality",
+        type=int,
+        default=82,
+        help="WebView JPEG quality (1-95). Lower is faster and smaller.",
+    )
+    parser.add_argument(
+        "--web-jpeg-subsampling",
+        type=int,
+        choices=[0, 1, 2],
+        default=2,
+        help="WebView JPEG chroma subsampling: 0=best/slowest (4:4:4), 2=fastest (4:2:0).",
+    )
+    parser.add_argument(
         "--render-collision-meshes",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -433,6 +448,8 @@ def parse_runtime_args(mujoco_dir: Path) -> RuntimeArgs:
         web_fps=ns.web_fps,
         web_width=ns.web_width,
         web_height=ns.web_height,
+        web_jpeg_quality=ns.web_jpeg_quality,
+        web_jpeg_subsampling=ns.web_jpeg_subsampling,
         render_collision_meshes=ns.render_collision_meshes,
         allow_keyboard_control=ns.allow_keyboard_control,
         port=ns.port,
