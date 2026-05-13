@@ -37,6 +37,10 @@
             <div style="text-align: center; color: #555;">
                 <p>Socket.IO: <span id="status">connecting...</span></p>
                 <p style="font-size: 12px; margin-top: -8px;">
+                    FPS: <span id="fps-value">0.0</span> |
+                    Source: <span id="fps-source">-</span>
+                </p>
+                <p style="font-size: 12px; margin-top: -8px;">
                     Last Msg: <span id="msg-time">-</span> |
                     ID: <span id="msg-id">-</span> |
                     Src: <span id="msg-src">-</span>
@@ -214,17 +218,45 @@
     <script>
         // Same host as the page (works when webview is opened via LAN IP, not only localhost).
         const socket = io({
-            transports: ["polling", "websocket"],
+            transports: ["websocket", "polling"],
             reconnection: true,
             reconnectionAttempts: 20,
             reconnectionDelay: 500,
         });
         const allowKeyboardControl = {{ (allow_keyboard_control | default(false)) | tojson }};
+        const FALLBACK_POLL_MS = 33;
+        const FALLBACK_STALE_MS = 220;
         let socketConnected = false;
         let httpFallbackTimer = null;
         let lastFrameTs = 0;
         let lastSocketFrameTs = 0;
         let fallbackBusy = false;
+        let frameTimes = [];
+        let lastFrameSource = "-";
+
+        function markFrame(source) {
+            const now = Date.now();
+            frameTimes.push(now);
+            const keepMs = 3000;
+            while (frameTimes.length > 0 && (now - frameTimes[0]) > keepMs) {
+                frameTimes.shift();
+            }
+            if (source) lastFrameSource = source;
+        }
+
+        function updateFpsDisplay() {
+            const fpsEl = document.getElementById("fps-value");
+            const srcEl = document.getElementById("fps-source");
+            if (!fpsEl || !srcEl) return;
+            let fps = 0.0;
+            if (frameTimes.length >= 2) {
+                const dt = (frameTimes[frameTimes.length - 1] - frameTimes[0]) / 1000.0;
+                if (dt > 0) fps = (frameTimes.length - 1) / dt;
+            }
+            fpsEl.textContent = fps.toFixed(1);
+            srcEl.textContent = lastFrameSource;
+        }
+        setInterval(updateFpsDisplay, 500);
 
         function setConnStatus(text) {
             const el = document.getElementById("status");
@@ -232,6 +264,7 @@
         }
         socket.on("connect", () => {
             socketConnected = true;
+            lastSocketFrameTs = Date.now();
             startHttpFallback();
             setConnStatus("connected");
         });
@@ -254,10 +287,11 @@
             try {
                 const now = Date.now();
                 // Avoid excessive browser image decode churn under fallback mode.
-                if (now - lastFrameTs > 250) {
+                if (now - lastFrameTs > 16) {
                     const img = document.getElementById('video');
                     img.src = `/api/frame.jpg?t=${now}`;
                     lastFrameTs = now;
+                    markFrame("http");
                 }
                 const resp = await fetch(`/api/states?t=${now}`, { cache: "no-store" });
                 if (resp.ok) {
@@ -274,10 +308,10 @@
         function startHttpFallback() {
             if (httpFallbackTimer) return;
             httpFallbackTimer = setInterval(() => {
-                if (!socketConnected || (Date.now() - lastSocketFrameTs > 1000)) {
+                if (!socketConnected || (Date.now() - lastSocketFrameTs > FALLBACK_STALE_MS)) {
                     pollFrameFallback();
                 }
-            }, 500);
+            }, FALLBACK_POLL_MS);
         }
 
         function stopHttpFallback() {
@@ -292,6 +326,7 @@
             requestAnimationFrame(() => {
                 img.src = 'data:image/jpeg;base64,' + data.image;
                 lastSocketFrameTs = Date.now();
+                markFrame("socket");
             });
         });
 
@@ -1202,35 +1237,35 @@
 
         /* Left Panel */
         .left-panel {
-            flex: 2;
+            flex: 5;
             display: flex;
             flex-direction: column;
             align-items: center;
             justify-content: center;
             background-color: #000;
-            padding: 10px;
+            padding: 0;
         }
 
         #video-container {
             width: 100%;
-            height: 95%;
+            height: 100%;
             display: flex;
             align-items: center;
             justify-content: center;
         }
 
         #video {
-            max-width: 100%;
-            max-height: 100%;
-            object-fit: contain;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
             box-shadow: 0 0 20px rgba(0, 0, 0, 0.8);
         }
 
         /* Right Panel */
         .right-panel {
             flex: 1;
-            min-width: 320px;
-            max-width: 450px;
+            min-width: 220px;
+            max-width: 300px;
             background-color: #f8f9fa;
             padding: 20px;
             overflow-y: auto;

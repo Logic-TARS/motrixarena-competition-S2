@@ -322,7 +322,8 @@ class MujocoLabWebView:
                 raise ValueError(f"expected HxWx3 RGB uint8, got shape={getattr(arr, 'shape', None)} dtype={arr.dtype}")
             image = Image.fromarray(arr, mode="RGB")
             bio = BytesIO()
-            image.save(bio, format="JPEG", quality=92)
+            # High-clarity profile: keep more detail in each frame.
+            image.save(bio, format="JPEG", quality=92, subsampling=0)
             jpeg_bytes = bio.getvalue()
             _queue_put_latest(self._event_q, {"type": "frame", "jpeg": jpeg_bytes}, max_drop=32)
         except Exception as e:

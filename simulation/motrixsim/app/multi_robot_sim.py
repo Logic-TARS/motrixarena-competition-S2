@@ -1428,6 +1428,8 @@ class MultiRobotMotrixSim:
         self._web_camera = None
         self._fallback_frame_logged = False
         self._render_scene_option = None
+        self._step_fail_count = 0
+        self._last_step_fail_log = 0.0
         if args.render_collision_meshes:
             print("[MultiRobotMotrixSim] render_collision_meshes ignored (MotrixSim web render path)")
 
@@ -1841,7 +1843,23 @@ class MultiRobotMotrixSim:
         if counter % self.control_decimation == 0:
             self._compute_targets()
         self._apply_torque()
-        self.model.step(self.data)
+        try:
+            self.model.step(self.data)
+        except BaseException as e:
+            if isinstance(e, (KeyboardInterrupt, SystemExit)):
+                raise
+            self._step_fail_count += 1
+            now = time.monotonic()
+            if now - self._last_step_fail_log >= 1.0:
+                self._last_step_fail_log = now
+                print(
+                    "[MotrixSim] model.step failed; resetting scene to recover "
+                    f"(count={self._step_fail_count}, err={type(e).__name__}: {e})"
+                )
+            # Motrix may throw pyo3 panic exceptions on ill-conditioned steps.
+            # Recover in-place instead of letting the whole process terminate.
+            self.reset(preserve_ball=True)
+            return 0
         self._update_referee(self.sim_dt)
         post_hold_changed = self._apply_robot_protection_holds()
         if post_hold_changed:
