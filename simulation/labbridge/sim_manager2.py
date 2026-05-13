@@ -8,6 +8,7 @@ import os
 import signal
 import socket
 import subprocess
+import sys
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -25,7 +26,11 @@ DEFAULT_SIM_ROOT = Path(os.environ.get("LABBRIDGE_SIM_ROOT", str(PROJECT_ROOT / 
 DEFAULT_RUNNER = Path(
     os.environ.get("LABBRIDGE_SIM_RUNNER", str(DEFAULT_SIM_ROOT / "sim2sim_runner.py"))
 ).resolve()
-PYTHON_BIN = Path(os.environ.get("PYTHON", "python"))
+_python_env = os.environ.get("PYTHON", "").strip()
+if _python_env and Path(_python_env).exists():
+    PYTHON_BIN = Path(_python_env)
+else:
+    PYTHON_BIN = Path(sys.executable)
 REGISTRY_PATH = Path(
     os.environ.get("LABBRIDGE_REGISTRY", str(PROJECT_ROOT / ".labbridge_sim_manager_registry.json"))
 ).resolve()
@@ -273,6 +278,9 @@ class SimManager:
             req.policy_device,
         ]
         cmd += ["--webview"] if req.webview else ["--no-webview"]
+        if req.webview:
+            # Keep simulation loop cooperative so embedded webview server stays responsive.
+            cmd += ["--real-time"]
         cmd += ["--allow-keyboard-control"] if req.allow_keyboard_control else ["--no-allow-keyboard-control"]
         cmd += ["--zmq"] if req.zmq else ["--no-zmq"]
         cmd += ["--use-referee"] if req.use_referee else ["--no-use-referee"]
@@ -285,6 +293,10 @@ class SimManager:
         if req.match_config:
             cmd += ["--match-config", req.match_config]
 
+        child_env = os.environ.copy()
+        # Prevent extremely noisy bevy logs (e.g. screenshot warning spam) from starving I/O.
+        child_env.setdefault("RUST_LOG", "error")
+
         proc = subprocess.Popen(
             cmd,
             #cwd=str(self.sim_root),
@@ -293,6 +305,7 @@ class SimManager:
             #stderr=subprocess.DEVNULL,
             stdout = None,
             stderr = None,
+            env=child_env,
             preexec_fn=os.setsid,
         )
         sim = ManagedSim(

@@ -132,7 +132,7 @@
         <summary style="cursor:pointer; font-weight:700;">Usage Guide</summary>
         <div style="margin-top:10px; font-size:13px; color:#374151; line-height:1.6;">
           <div>1. 在 <b>Start Simulation</b> 设置参数后点击 <b>Start</b>。端口可留空，系统会自动分配。</div>
-          <div>2. 点击 <b>Refresh</b> 或等待自动刷新，在 <b>Scanned Sim Processes</b> 查看进程、ZMQ 端口、队伍人数与 WebView 链接。</div>
+          <div>2. 点击 <b>Refresh</b> 或等待自动刷新，在 <b>Scanned Sim Processes</b> 查看进程、ZMQ 端口、队伍人数与 WebView 链接（链接使用当前页面的主机名；若用 SSH 只转发了 Manager 端口，请同时转发 WebView 端口，例如 <code>ssh -L 8000:127.0.0.1:8000 -L 5811:127.0.0.1:5811 ...</code>）。</div>
           <div>3. 在 <b>Process Control</b> 选择 PID 后，点击 <b>Stop PID</b> 可停止单个仿真；点击 <b>Stop All</b> 可停止全部仿真。</div>
           <div>4. 选择 PID 后展开 <b>Decider Commands</b>，可复制每个机器人的 decider 启动命令。</div>
           <div>5. 页面底部 <b>Logs</b> 会显示启动和停止操作结果。</div>
@@ -271,8 +271,12 @@
           const webviewPort = managedMeta && Number.isFinite(managedMeta.webview_port)
             ? managedMeta.webview_port
             : parseWebviewPortFromCmd(row.cmd);
+          // Use the same host as this manager page. Hardcoding 127.0.0.1 breaks remote/LAN access
+          // (the browser would open the viewer on the client machine, not the sim host).
+          const webHost = window.location.hostname || "127.0.0.1";
+          const webProto = window.location.protocol === "https:" ? "https:" : "http:";
           const webviewCell = webviewPort
-            ? `<a class="link" href="http://127.0.0.1:${webviewPort}" target="_blank">open :${webviewPort}</a>`
+            ? `<a class="link" href="${webProto}//${webHost}:${webviewPort}" target="_blank">open :${webviewPort}</a>`
             : "-";
           const zmqPortCell = Number.isFinite(row.zmq_port) ? row.zmq_port : "-";
           const teamSizeCell = Number.isFinite(row.team_size) ? row.team_size : "-";

@@ -35,7 +35,7 @@
                 <img id="video" src="" alt="Video Feed" />
             </div>
             <div style="text-align: center; color: #555;">
-                <p>Status: <span id="status">Connected</span></p>
+                <p>Socket.IO: <span id="status">connecting...</span></p>
                 <p style="font-size: 12px; margin-top: -8px;">
                     Last Msg: <span id="msg-time">-</span> |
                     ID: <span id="msg-id">-</span> |
@@ -212,15 +212,86 @@
     </div>
 
     <script>
-        // Establish SocketIO connection with the server
-        const socket = io();
+        // Same host as the page (works when webview is opened via LAN IP, not only localhost).
+        const socket = io({
+            transports: ["polling", "websocket"],
+            reconnection: true,
+            reconnectionAttempts: 20,
+            reconnectionDelay: 500,
+        });
         const allowKeyboardControl = {{ (allow_keyboard_control | default(false)) | tojson }};
+        let socketConnected = false;
+        let httpFallbackTimer = null;
+        let lastFrameTs = 0;
+        let lastSocketFrameTs = 0;
+        let fallbackBusy = false;
+
+        function setConnStatus(text) {
+            const el = document.getElementById("status");
+            if (el) el.textContent = text;
+        }
+        socket.on("connect", () => {
+            socketConnected = true;
+            startHttpFallback();
+            setConnStatus("connected");
+        });
+        socket.on("disconnect", () => {
+            socketConnected = false;
+            setConnStatus("disconnected");
+            startHttpFallback();
+        });
+        socket.on("connect_error", (err) => {
+            console.error("Socket.IO connect_error", err);
+            socketConnected = false;
+            const msg = (err && (err.message || err.description)) ? String(err.message || err.description) : "unknown";
+            setConnStatus(`connect_error: ${msg}`);
+            startHttpFallback();
+        });
+
+        async function pollFrameFallback() {
+            if (fallbackBusy) return;
+            fallbackBusy = true;
+            try {
+                const now = Date.now();
+                // Avoid excessive browser image decode churn under fallback mode.
+                if (now - lastFrameTs > 250) {
+                    const img = document.getElementById('video');
+                    img.src = `/api/frame.jpg?t=${now}`;
+                    lastFrameTs = now;
+                }
+                const resp = await fetch(`/api/states?t=${now}`, { cache: "no-store" });
+                if (resp.ok) {
+                    const states = await resp.json();
+                    handleRobotStates(states);
+                }
+            } catch (e) {
+                // Keep fallback silent; connect status is shown above.
+            } finally {
+                fallbackBusy = false;
+            }
+        }
+
+        function startHttpFallback() {
+            if (httpFallbackTimer) return;
+            httpFallbackTimer = setInterval(() => {
+                if (!socketConnected || (Date.now() - lastSocketFrameTs > 1000)) {
+                    pollFrameFallback();
+                }
+            }, 500);
+        }
+
+        function stopHttpFallback() {
+            if (!httpFallbackTimer) return;
+            clearInterval(httpFallbackTimer);
+            httpFallbackTimer = null;
+        }
 
         // Listen for 'new_frame' event from the server
         socket.on('new_frame', (data) => {
             const img = document.getElementById('video');
             requestAnimationFrame(() => {
                 img.src = 'data:image/jpeg;base64,' + data.image;
+                lastSocketFrameTs = Date.now();
             });
         });
 
@@ -1046,7 +1117,8 @@
             drawMinimap();
         });
 
-        socket.on('robot_states', function (states) {
+        function handleRobotStates(states) {
+            if (!states || typeof states !== "object") return;
             // Handle Metadata first
             if (states._last_msg) {
                 const msg = states._last_msg;
@@ -1095,7 +1167,9 @@
             renderVelocityControls();
             if (!keyboardRobotOptionsLocked) refreshKeyboardRobotOptions();
             drawMinimap();
-        });
+        }
+
+        socket.on('robot_states', handleRobotStates);
 
         drawMinimap();
     </script>

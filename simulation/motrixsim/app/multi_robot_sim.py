@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import socket
 import sys
 import tempfile
 import time
@@ -15,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import xml.etree.ElementTree as ET
 
-import mujoco
+import motrixsim as mtx
 import numpy as np
 import torch
 import torch.nn as nn
@@ -39,6 +40,260 @@ from .runtime_config import (
 )
 from .soccer_referee import MujocoSoccerReferee
 from .webview_server import MujocoLabWebView
+
+
+def _mtx_resolve_joint_index(model: mtx.SceneModel, joint_name: str) -> int:
+    """Resolve MJCF-style joint name to MotrixSim joint index (handles naming differences)."""
+    j = model.get_joint_index(joint_name)
+    if j is not None:
+        return int(j)
+    if "__" in joint_name:
+        robot, short = joint_name.split("__", 1)
+        for alt in (f"{robot}/{short}", f"{robot}.{short}", f"{robot}_{short}"):
+            j = model.get_joint_index(alt)
+            if j is not None:
+                return int(j)
+    names = getattr(model, "joint_names", None) or ()
+    for i, jn in enumerate(names):
+        if jn is None:
+            continue
+        if jn == joint_name:
+            return int(i)
+        if "__" in joint_name:
+            robot, short = joint_name.split("__", 1)
+            if short in str(jn) and robot in str(jn):
+                return int(i)
+    for joint in getattr(model, "joints", ()) or ():
+        jn = getattr(joint, "name", None)
+        if jn == joint_name:
+            return int(joint.index)
+        if jn and "__" in joint_name and joint_name == jn:
+            return int(joint.index)
+    sample = [x for x in names[:40] if x is not None]
+    raise RuntimeError(f"MotrixSim: joint not found: {joint_name!r}. Sample joint_names={sample!r}")
+
+
+def _mtx_root_base_dof_addrs(model: mtx.SceneModel, robot_body_name: str) -> tuple[int, int] | None:
+    """
+    Floating-base qpos/qvel slice starts from Body.get_dof_*_indices (MotrixSim may not
+    register MJCF free-joint names on get_joint_index for the root link).
+    """
+    bd = model.get_body(robot_body_name)
+    if bd is None:
+        return None
+    pos_idx = np.asarray(bd.get_dof_pos_indices(include_floatingbase=True), dtype=np.int64).reshape(-1)
+    vel_idx = np.asarray(bd.get_dof_vel_indices(include_floatingbase=True), dtype=np.int64).reshape(-1)
+    if pos_idx.size < 6 or vel_idx.size < 6:
+        return None
+    return int(pos_idx[0]), int(vel_idx[0])
+
+
+def _mtx_joint_qpos_start(model: mtx.SceneModel, joint_name: str) -> int:
+    ji = _mtx_resolve_joint_index(model, joint_name)
+    return int(model.joint_dof_pos_indices[ji])
+
+
+def _mtx_joint_qvel_start(model: mtx.SceneModel, joint_name: str) -> int:
+    ji = _mtx_resolve_joint_index(model, joint_name)
+    return int(model.joint_dof_vel_indices[ji])
+
+
+def _mtx_actuator_index(model: mtx.SceneModel, actuator_name: str) -> int:
+    a = model.get_actuator_index(actuator_name)
+    if a is not None:
+        return int(a)
+    if "__" in actuator_name:
+        robot, short = actuator_name.split("__", 1)
+        for alt in (f"{robot}/{short}", f"{robot}.{short}", f"{robot}_{short}"):
+            a = model.get_actuator_index(alt)
+            if a is not None:
+                return int(a)
+    raise RuntimeError(f"MotrixSim: actuator not found: {actuator_name!r}")
+
+
+def _mtx_sensor_vec(model: mtx.SceneModel, data: mtx.SceneData, sensor_name: str) -> np.ndarray:
+    v = np.asarray(model.get_sensor_value(sensor_name, data), dtype=np.float32)
+    if v.ndim >= 2 and v.shape[0] == data.shape[0]:
+        v = v[0]
+    return v.reshape(-1).astype(np.float32)
+
+
+def _mtx_ball_robot_contact_pairs(model: mtx.SceneModel) -> tuple[np.ndarray, np.ndarray]:
+    """Geom index pairs (ball, robot_geom) and parallel robot id (-1 if unknown)."""
+    try:
+        ball = int(model.get_geom_index("ball"))
+    except Exception:
+        return np.zeros((0, 2), dtype=np.uint32), np.zeros((0,), dtype=np.int32)
+    pairs: list[tuple[int, int]] = []
+    rids: list[int] = []
+    for gname in model.geom_names:
+        if not gname or gname == "ball":
+            continue
+        gl = gname.lower()
+        if "pitch" in gl or gname == "ground":
+            continue
+        if not (gname.startswith("robot_rp") or gname.startswith("robot_bp")):
+            continue
+        if "__" not in gname:
+            continue
+        robot_name = gname.split("__", 1)[0]
+        rid = FIXED_ROBOT_NAME_TO_ID.get(robot_name, -1)
+        try:
+            gid = int(model.get_geom_index(gname))
+        except Exception:
+            continue
+        pairs.append((ball, gid))
+        rids.append(int(rid))
+    if not pairs:
+        return np.zeros((0, 2), dtype=np.uint32), np.zeros((0,), dtype=np.int32)
+    return np.asarray(pairs, dtype=np.uint32).reshape(-1, 2), np.asarray(rids, dtype=np.int32)
+
+
+class _BlackFrameRenderer:
+    def __init__(self, height: int, width: int):
+        self._shape = (max(1, int(height)), max(1, int(width)), 3)
+
+    def update_scene(self, data, camera=None, scene_option=None):
+        pass
+
+    def render(self) -> np.ndarray:
+        return np.zeros(self._shape, dtype=np.uint8)
+
+    def close(self) -> None:
+        pass
+
+
+def _motrix_capture_task_done(task) -> bool:
+    """True when Motrix reports capture finished (binding may use str or enum-like object)."""
+    st = getattr(task, "state", None)
+    if st == "done" or st == "Done" or st is True:
+        return True
+    nm = getattr(st, "name", None)
+    if isinstance(nm, str) and nm.lower() == "done":
+        return True
+    return False
+
+
+def _motrix_capture_task_closed(task) -> bool:
+    st = getattr(task, "state", None)
+    if st == "closed":
+        return True
+    return "closed" in str(st).lower()
+
+
+class _MotrixHeadlessRenderer:
+    """Best-effort headless RGB using motrixsim.render (see MotrixSim docs)."""
+
+    def __init__(self, model: mtx.SceneModel, width: int, height: int):
+        from motrixsim.render import RenderApp, RenderSettings
+
+        self._h = max(1, int(height))
+        self._w = max(1, int(width))
+        self._capture_cam_index = 0
+        # Motrix docs: camera render target must be configured BEFORE RenderApp.launch().
+        # Without this, headless capture can fallback to Window(Primary) and return no frames.
+        try:
+            cam_mgr = model.cameras
+            for i in range(len(cam_mgr)):
+                cam = cam_mgr[i]
+                try:
+                    cam.set_render_target("image", self._w, self._h)
+                except Exception:
+                    continue
+            # Prefer our injected scene camera when available.
+            try:
+                idx = cam_mgr.get_index("lab_webview_camera")
+                if idx is not None:
+                    self._capture_cam_index = int(idx)
+            except Exception:
+                pass
+        except Exception:
+            pass
+        self._app = RenderApp(headless=True)
+        settings = RenderSettings.performance()
+        self._app.launch(model, batch=1, render_settings=settings)
+        self._cam = self._app.get_camera(self._capture_cam_index)
+        if self._cam is None:
+            for i in range(32):
+                c = self._app.get_camera(i)
+                if c is not None:
+                    self._cam = c
+                    break
+        self._capture_disabled = self._cam is None
+        if self._capture_disabled:
+            print(
+                "[MotrixWebView] No MJCF camera found for RenderApp; video frames will be black "
+                "(add <camera name='...'/> to the scene or extend _ensure_default_scene_camera_for_motrix)."
+            )
+        self._last_task = None
+        self._last_rgb: np.ndarray | None = None
+        self._capture_done_warned = False
+
+    def update_scene(self, data, camera=None, scene_option=None):
+        self._app.sync(data, wait=False)
+        if self._capture_disabled or self._cam is None:
+            self._last_task = None
+            return
+        self._last_task = self._cam.capture()
+
+    def render(self) -> np.ndarray:
+        task = self._last_task
+        if task is None:
+            if self._last_rgb is not None:
+                return self._last_rgb
+            return np.zeros((self._h, self._w, 3), dtype=np.uint8)
+        img = None
+        # Drive renderer once more so async capture task can complete.
+        # In some Motrix builds, polling task.state alone may stay pending.
+        try:
+            self._app.sync(None, wait=True)
+        except Exception:
+            pass
+        for _ in range(4):
+            try:
+                img = task.take_image()
+            except Exception:
+                img = None
+            if img is not None or _motrix_capture_task_closed(task):
+                break
+            try:
+                self._app.sync(None, wait=True)
+            except Exception:
+                break
+        if img is None and not self._capture_done_warned:
+            st = getattr(task, "state", None)
+            print(
+                f"[MotrixWebView] capture still not ready (state={st!r} type={type(st).__name__}); "
+                "video may stay black until Motrix returns a completed capture."
+            )
+            self._capture_done_warned = True
+        if img is not None:
+            px = np.asarray(img.pixels, dtype=np.uint8)
+            if px.ndim == 3 and px.shape[2] == 4:
+                px = px[:, :, :3]
+            if px.ndim == 3 and px.shape[2] == 3:
+                self._last_rgb = px
+                return px
+        if self._last_rgb is not None:
+            return self._last_rgb
+        return np.zeros((self._h, self._w, 3), dtype=np.uint8)
+
+    def close(self) -> None:
+        try:
+            self._app.close()
+        except Exception:
+            pass
+
+
+class _FreeCameraView:
+    """Minimal stand-in for mujoco.MjvCamera (lookat, distance, azimuth, elevation)."""
+
+    def __init__(self):
+        self.lookat = np.array([0.0, 0.0, 0.8], dtype=np.float64)
+        self.distance = 18.0
+        self.azimuth = 45.0
+        self.elevation = -35.0
+        self.type = 0
 
 
 FIELD_PRESETS = {
@@ -364,6 +619,23 @@ def _prefix_body_tree_names(body: ET.Element, robot_name: str):
                 elem.set("name", f"{robot_name}__{name}")
         elif elem.tag in ("joint", "freejoint", "site", "geom", "camera", "light"):
             elem.set("name", f"{robot_name}__{name}")
+
+
+def _ensure_default_scene_camera_for_motrix(worldbody: ET.Element) -> None:
+    """MotrixSim RenderApp.get_camera(i) is only defined when the MJCF defines at least one camera."""
+    if any(ch.tag == "camera" for ch in worldbody):
+        return
+    # Aim at the field center; do not use axis-aligned down view from corner
+    # (it can miss the pitch entirely and look like an empty dark frame).
+    ET.SubElement(
+        worldbody,
+        "camera",
+        name="lab_webview_camera",
+        pos="-14 -14 12",
+        mode="fixed",
+        fovy="55",
+        xyaxes="0.7071068 -0.7071068 0 0.3478566 0.3478566 0.8703883",
+    )
 
 
 def _spawn_xy_theta(team: str, idx: int, count: int, field_size: tuple[float, float] | None) -> tuple[float, float, float]:
@@ -900,6 +1172,8 @@ def _build_multi_robot_soccer_scene_xml(
                 copied.set("rgba", "0.18 0.45 0.18 1")
             worldbody.append(copied)
 
+    _ensure_default_scene_camera_for_motrix(worldbody)
+
     _add_outer_floor_planes(worldbody, field_length=out_field_len, field_width=out_field_wid, cfg=outer_floor_cfg)
     _add_field_markings(worldbody, field_length=out_field_len, field_width=out_field_wid, cfg=field_markings_cfg)
 
@@ -1018,7 +1292,7 @@ class RobotSpec:
     pi_target_dof_pos: np.ndarray | None = None
 
 
-class MultiRobotMujocoSim:
+class MultiRobotMotrixSim:
     def __init__(self, args: RuntimeArgs):
         self.args = args
         self.robot_cfg: RobotRuntimeConfig = args.robot_cfg
@@ -1060,21 +1334,34 @@ class MultiRobotMujocoSim:
             keep_robot_sensors=(self.robot_cfg.robot_type == PI_PLUS_ROBOT_TYPE),
         )
 
-        self.model = mujoco.MjModel.from_xml_path(str(scene_xml))
-        self.data = mujoco.MjData(self.model)
+        self.model = mtx.load_model(str(scene_xml))
+        self.data = mtx.SceneData(self.model, batch=[1])
         self.sim_dt = float(self.robot_cfg.sim_dt)
-        self.model.opt.timestep = self.sim_dt
+        self.model.options.timestep = self.sim_dt
         if self.robot_cfg.robot_type == PI_PLUS_ROBOT_TYPE:
             # Match sim2sim_pi_plus.py: only timestep is explicitly configured.
-            # Keep integrator/noslip from model XML defaults.
             pass
         else:
-            self.model.opt.integrator = mujoco.mjtIntegrator.mjINT_RK4
-            self.model.opt.noslip_iterations = 100
+            # MotrixSim uses its own integrator / solver; no MuJoCo RK4/noslip toggles.
+            pass
         self.control_decimation = int(self.robot_cfg.control_decimation)
 
+        self._ball_body = None
+        try:
+            self._ball_body = self.model.get_body("ball")
+        except Exception:
+            self._ball_body = None
+        self._ball_geom_contact_pairs, self._ball_geom_contact_rids = _mtx_ball_robot_contact_pairs(self.model)
+        self._ball_qpos_adr: int | None = None
+        self._ball_qvel_adr: int | None = None
+        try:
+            self._ball_qpos_adr = _mtx_joint_qpos_start(self.model, "ball-root")
+            self._ball_qvel_adr = _mtx_joint_qvel_start(self.model, "ball-root")
+        except Exception:
+            pass
+
         self.policy_device = self._resolve_policy_device(args.policy_device)
-        print(f"[MultiRobotMujocoSim] policy device: {self.policy_device}")
+        print(f"[MultiRobotMotrixSim] policy device: {self.policy_device}")
         self.policy = self._load_policy(args.policy)
 
         self.robot_specs: dict[int, RobotSpec] = self._build_robot_specs()
@@ -1103,10 +1390,10 @@ class MultiRobotMujocoSim:
         self._policy_print_step = 0
         self._printed_target_policy_io = False
 
-        self._startup_qpos = self.data.qpos.copy()
-        self._startup_qvel = self.data.qvel.copy()
-        self._startup_ctrl = self.data.ctrl.copy()
-        self._startup_act = self.data.act.copy() if self.data.act.size > 0 else np.array([], dtype=np.float32)
+        self._startup_qpos = np.asarray(self.data.dof_pos, dtype=np.float64).reshape(-1).copy()
+        self._startup_qvel = np.asarray(self.data.dof_vel, dtype=np.float64).reshape(-1).copy()
+        self._startup_ctrl = np.asarray(self.data.actuator_ctrls, dtype=np.float64).reshape(-1).copy()
+        self._startup_act = np.array([], dtype=np.float32)
         self._saved_spawn_points: dict[str, list[float]] = {}
         self._robot_protect_until: dict[int, float] = {}
         self._robot_protect_pose: dict[int, tuple[float, float, float]] = {}
@@ -1134,78 +1421,19 @@ class MultiRobotMujocoSim:
                 left_team_name=str(team_meta_cfg["red"]["team_name"]),
                 right_team_name=str(team_meta_cfg["blue"]["team_name"]),
             )
-            print("[MultiRobotMujocoSim] referee: enabled")
+            print("[MultiRobotMotrixSim] referee: enabled")
         else:
-            print("[MultiRobotMujocoSim] referee: disabled")
+            print("[MultiRobotMotrixSim] referee: disabled")
 
         self._web_camera = None
+        self._fallback_frame_logged = False
         self._render_scene_option = None
         if args.render_collision_meshes:
-            self._render_scene_option = mujoco.MjvOption()
-            mujoco.mjv_defaultOption(self._render_scene_option)
-            # MuJoCo convention in our robot XMLs: visual geoms use group 1, collision geoms stay in group 0.
-            self._render_scene_option.geomgroup[:] = 1
-            self._render_scene_option.geomgroup[1] = 0
+            print("[MultiRobotMotrixSim] render_collision_meshes ignored (MotrixSim web render path)")
 
     def _apply_team_body_colors(self) -> None:
-        """
-        Tint only robot upper-body geoms (excluding head) by team color.
-        Robot prefixes are:
-          - red:  robot_rp*
-          - blue: robot_bp*
-        This is a visual-only change and does not affect physics.
-        """
-        red_rgba = np.array([0.92, 0.22, 0.22, 1.0], dtype=np.float32)
-        blue_rgba = np.array([0.23, 0.40, 0.92, 1.0], dtype=np.float32)
-        colored = 0
-        skipped_head = 0
-        skipped_non_upper = 0
-        skipped_unknown = 0
-
-        # Vest-style tint: central torso only (no arms/legs/head).
-        upper_tokens = ("trunk", "torso", "chest", "waist", "pelvis", "base", "body")
-        head_tokens = ("head", "camera", "zed", "neck")
-        lower_body_tokens = ("hip", "thigh", "knee", "ankle", "foot", "shank", "calf", "leg")
-
-        for gid in range(self.model.ngeom):
-            gname = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_GEOM, gid)
-            bid = int(self.model.geom_bodyid[gid])
-            bname = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_BODY, bid) or ""
-            name_for_team = gname or bname
-            if not name_for_team:
-                skipped_unknown += 1
-                continue
-            target = None
-            if name_for_team.startswith("robot_rp"):
-                target = red_rgba
-            elif name_for_team.startswith("robot_bp"):
-                target = blue_rgba
-            if target is None:
-                continue
-
-            # Prefer body name for part classification; fallback to geom name.
-            part_name = (bname or gname or "").lower()
-            if any(tok in part_name for tok in head_tokens):
-                skipped_head += 1
-                continue
-            if any(tok in part_name for tok in lower_body_tokens):
-                skipped_non_upper += 1
-                continue
-            if not any(tok in part_name for tok in upper_tokens):
-                skipped_non_upper += 1
-                continue
-
-            # Keep original alpha so transparent parts remain transparent.
-            old_alpha = float(self.model.geom_rgba[gid, 3])
-            self.model.geom_rgba[gid, :3] = target[:3]
-            self.model.geom_rgba[gid, 3] = old_alpha
-            colored += 1
-
-        print(
-            "[MultiRobotMujocoSim] team color tint applied to "
-            f"{colored} upper-body geoms (head skipped={skipped_head}, "
-            f"other skipped={skipped_non_upper}, unknown={skipped_unknown})"
-        )
+        """Team tint was implemented via MuJoCo geom_rgba; MotrixSim path skips (visual-only)."""
+        print("[MultiRobotMotrixSim] team color tint skipped under MotrixSim (MJCF materials unchanged)")
 
     @staticmethod
     def _active_ids_from_limits(max_red: int, max_blue: int) -> list[int]:
@@ -1222,7 +1450,7 @@ class MultiRobotMujocoSim:
         if req == "gpu":
             if torch.cuda.is_available():
                 return torch.device("cuda")
-            print("[MultiRobotMujocoSim] policy device requested=gpu but CUDA is unavailable, fallback to cpu")
+            print("[MultiRobotMotrixSim] policy device requested=gpu but CUDA is unavailable, fallback to cpu")
             return torch.device("cpu")
         raise ValueError(f"Unsupported policy device: {requested}")
 
@@ -1269,30 +1497,32 @@ class MultiRobotMujocoSim:
             qpos_idx = []
             qvel_idx = []
             for jn in pref_joints:
-                jid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, jn)
-                if jid < 0:
-                    raise RuntimeError(f"Missing policy joint: {jn}")
-                qpos_idx.append(int(self.model.jnt_qposadr[jid]))
-                qvel_idx.append(int(self.model.jnt_dofadr[jid]))
+                try:
+                    qpos_idx.append(_mtx_joint_qpos_start(self.model, jn))
+                    qvel_idx.append(_mtx_joint_qvel_start(self.model, jn))
+                except Exception as e:
+                    raise RuntimeError(f"Missing policy joint: {jn}") from e
 
             act_idx: list[int] = []
             for jn in pref_joints:
-                aid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, f"{name}__{jn.split('__', 1)[1]}")
-                if aid < 0:
-                    raise RuntimeError(f"Missing actuator for policy joint: {jn}")
-                act_idx.append(int(aid))
+                an = f"{name}__{jn.split('__', 1)[1]}"
+                try:
+                    act_idx.append(_mtx_actuator_index(self.model, an))
+                except Exception as e:
+                    raise RuntimeError(f"Missing actuator for policy joint: {jn} ({an})") from e
 
-            base_jid = mujoco.mj_name2id(
-                self.model,
-                mujoco.mjtObj.mjOBJ_JOINT,
-                f"{name}__{self.robot_cfg.base_joint_name}",
-            )
-            if base_jid < 0:
-                raise RuntimeError(f"Missing base freejoint for {name}")
-            base_qpos_adr = int(self.model.jnt_qposadr[base_jid])
-            base_qvel_adr = int(self.model.jnt_dofadr[base_jid])
+            base_jn = f"{name}__{self.robot_cfg.base_joint_name}"
+            try:
+                root_addrs = _mtx_root_base_dof_addrs(self.model, name)
+                if root_addrs is not None:
+                    base_qpos_adr, base_qvel_adr = root_addrs
+                else:
+                    base_qpos_adr = _mtx_joint_qpos_start(self.model, base_jn)
+                    base_qvel_adr = _mtx_joint_qvel_start(self.model, base_jn)
+            except Exception as e:
+                raise RuntimeError(f"Missing base freejoint for {name}") from e
 
-            init_joint_pos = self.data.qpos[np.asarray(qpos_idx, dtype=np.int32)].astype(np.float32).copy()
+            init_joint_pos = self.data.dof_pos[0, np.asarray(qpos_idx, dtype=np.int32)].astype(np.float32).copy()
             # Enforce requested startup/reset joint pose for every robot.
             for jname, val in self.robot_cfg.reset_joint_pos.items():
                 try:
@@ -1300,7 +1530,7 @@ class MultiRobotMujocoSim:
                 except ValueError:
                     continue
                 init_joint_pos[local_idx] = float(val)
-                self.data.qpos[qpos_idx[local_idx]] = float(val)
+                self.data.dof_pos[0, qpos_idx[local_idx]] = float(val)
             init_angles = init_joint_pos.copy()
             pi_qpos_idx_mujoco = None
             pi_qvel_idx_mujoco = None
@@ -1321,15 +1551,12 @@ class MultiRobotMujocoSim:
                 pi_qvel = []
                 pi_act = []
                 for jn in pi_pref_joints:
-                    jid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, jn)
-                    if jid < 0:
-                        raise RuntimeError(f"Missing pi_plus mujoco-order joint: {jn}")
-                    pi_qpos.append(int(self.model.jnt_qposadr[jid]))
-                    pi_qvel.append(int(self.model.jnt_dofadr[jid]))
-                    aid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, jn)
-                    if aid < 0:
-                        raise RuntimeError(f"Missing pi_plus mujoco-order actuator: {jn}")
-                    pi_act.append(int(aid))
+                    try:
+                        pi_qpos.append(_mtx_joint_qpos_start(self.model, jn))
+                        pi_qvel.append(_mtx_joint_qvel_start(self.model, jn))
+                        pi_act.append(_mtx_actuator_index(self.model, jn))
+                    except Exception as e:
+                        raise RuntimeError(f"Missing pi_plus mujoco-order joint/actuator: {jn}") from e
                 pi_qpos_idx_mujoco = np.asarray(pi_qpos, dtype=np.int32)
                 pi_qvel_idx_mujoco = np.asarray(pi_qvel, dtype=np.int32)
                 pi_act_idx_mujoco = np.asarray(pi_act, dtype=np.int32)
@@ -1337,7 +1564,7 @@ class MultiRobotMujocoSim:
                 pi_isaac_to_mujoco_idx = PI_PLUS_ISAAC_TO_MUJOCO_IDX.copy()
                 pi_mujoco_to_isaac_idx = PI_PLUS_MUJOCO_TO_ISAAC_IDX.copy()
                 # Keep startup pose exactly aligned with sim2sim_pi_plus.py default_dof_pos.
-                self.data.qpos[pi_qpos_idx_mujoco] = pi_default_dof_pos
+                self.data.dof_pos[0, pi_qpos_idx_mujoco] = pi_default_dof_pos
                 pi_filtered_dof_target = pi_default_dof_pos.copy()
                 pi_target_dof_pos = pi_default_dof_pos.copy()
             else:
@@ -1411,8 +1638,8 @@ class MultiRobotMujocoSim:
 
     def _obs_for_robot(self, spec: RobotSpec, cmd_override: np.ndarray | None = None) -> np.ndarray:
         obs_scale = self.robot_cfg.obs_scale
-        qpos = self.data.qpos
-        qvel = self.data.qvel
+        qpos = self.data.dof_pos[0]
+        qvel = self.data.dof_vel[0]
 
         base_lin_world = qvel[spec.base_qvel_adr : spec.base_qvel_adr + 3]
         base_ang_world = qvel[spec.base_qvel_adr + 3 : spec.base_qvel_adr + 6]
@@ -1443,11 +1670,11 @@ class MultiRobotMujocoSim:
             sensor_ang_name = f"{spec.name}__angular-velocity"
             sensor_ori_name = f"{spec.name}__orientation"
             try:
-                base_ang_pi = self.data.sensor(sensor_ang_name).data.astype(np.float32)
+                base_ang_pi = _mtx_sensor_vec(self.model, self.data, sensor_ang_name)
             except Exception:
                 base_ang_pi = base_ang.astype(np.float32)
             try:
-                ori_wxyz = self.data.sensor(sensor_ori_name).data.astype(np.float32)
+                ori_wxyz = _mtx_sensor_vec(self.model, self.data, sensor_ori_name)
                 quat_xyzw = ori_wxyz[[1, 2, 3, 0]]
             except Exception:
                 quat_xyzw = np.asarray([quat[1], quat[2], quat[3], quat[0]], dtype=np.float32)
@@ -1576,9 +1803,9 @@ class MultiRobotMujocoSim:
     def _apply_torque(self):
         for spec in self.robot_specs.values():
             if self._is_robot_protected(spec.rid):
-                self.data.ctrl[spec.act_idx] = self._startup_ctrl[spec.act_idx]
+                self.data.actuator_ctrls[0, spec.act_idx] = self._startup_ctrl[spec.act_idx]
                 if spec.pi_act_idx_mujoco is not None:
-                    self.data.ctrl[spec.pi_act_idx_mujoco] = self._startup_ctrl[spec.pi_act_idx_mujoco]
+                    self.data.actuator_ctrls[0, spec.pi_act_idx_mujoco] = self._startup_ctrl[spec.pi_act_idx_mujoco]
                 continue
             use_pi_pd = (
                 self.robot_cfg.robot_type == PI_PLUS_ROBOT_TYPE
@@ -1588,11 +1815,11 @@ class MultiRobotMujocoSim:
                 and spec.pi_target_dof_pos is not None
             )
             if use_pi_pd:
-                q = self.data.qpos[spec.pi_qpos_idx_mujoco]
-                qd = self.data.qvel[spec.pi_qvel_idx_mujoco]
+                q = self.data.dof_pos[0, spec.pi_qpos_idx_mujoco]
+                qd = self.data.dof_vel[0, spec.pi_qvel_idx_mujoco]
             else:
-                q = self.data.qpos[spec.qpos_idx]
-                qd = self.data.qvel[spec.qvel_idx]
+                q = self.data.dof_pos[0, spec.qpos_idx]
+                qd = self.data.dof_vel[0, spec.qvel_idx]
             q = np.nan_to_num(q, nan=0.0, posinf=0.0, neginf=0.0)
             qd = np.nan_to_num(qd, nan=0.0, posinf=0.0, neginf=0.0)
             if use_pi_pd:
@@ -1603,58 +1830,46 @@ class MultiRobotMujocoSim:
             tau = np.clip(tau, -spec.effort, spec.effort)
             tau = np.nan_to_num(tau, nan=0.0, posinf=0.0, neginf=0.0)
             if use_pi_pd:
-                self.data.ctrl[spec.pi_act_idx_mujoco] = tau
+                self.data.actuator_ctrls[0, spec.pi_act_idx_mujoco] = tau
             else:
-                self.data.ctrl[spec.act_idx] = tau
+                self.data.actuator_ctrls[0, spec.act_idx] = tau
 
     def _step_once(self, counter: int) -> int:
         pre_hold_changed = self._apply_robot_protection_holds()
         if pre_hold_changed:
-            mujoco.mj_forward(self.model, self.data)
+            self.model.forward_kinematic(self.data)
         if counter % self.control_decimation == 0:
             self._compute_targets()
         self._apply_torque()
-        mujoco.mj_step(self.model, self.data)
+        self.model.step(self.data)
         self._update_referee(self.sim_dt)
         post_hold_changed = self._apply_robot_protection_holds()
         if post_hold_changed:
-            mujoco.mj_forward(self.model, self.data)
+            self.model.forward_kinematic(self.data)
         fall_recovered = self._recover_fallen_robots()
         if fall_recovered:
-            mujoco.mj_forward(self.model, self.data)
+            self.model.forward_kinematic(self.data)
         if (
-            not np.isfinite(self.data.qpos).all()
-            or not np.isfinite(self.data.qvel).all()
-            or not np.isfinite(self.data.ctrl).all()
+            not np.isfinite(self.data.dof_pos).all()
+            or not np.isfinite(self.data.dof_vel).all()
+            or not np.isfinite(self.data.actuator_ctrls).all()
         ):
             self.reset(preserve_ball=True)
             return 0
         return counter + 1
 
     def _detect_ball_contact_rid(self) -> int | None:
+        if self._ball_geom_contact_pairs.size == 0:
+            return None
+        cquery = self.model.get_contact_query(self.data)
+        hit = np.asarray(cquery.is_colliding(self._ball_geom_contact_pairs)).reshape(-1)
+        if hit.size == 0 or not hit.any():
+            return None
         active: set[int] = set()
-        for i in range(int(self.data.ncon)):
-            c = self.data.contact[i]
-            g1 = int(c.geom1)
-            g2 = int(c.geom2)
-            n1 = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_GEOM, g1) or ""
-            n2 = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_GEOM, g2) or ""
-            if n1 != "ball" and n2 != "ball":
-                continue
-            other_gid = g2 if n1 == "ball" else g1
-            other = n2 if n1 == "ball" else n1
-            # Many collision geoms do not have a prefixed geom name.
-            # Fallback to owning body name, which is always prefixed.
-            if "__" in other:
-                owner_name = other
-            else:
-                body_id = int(self.model.geom_bodyid[other_gid])
-                owner_name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_BODY, body_id) or ""
-            if "__" not in owner_name:
-                continue
-            robot_name = owner_name.split("__", 1)[0]
-            rid = FIXED_ROBOT_NAME_TO_ID.get(robot_name)
-            if rid is not None and rid in self.robot_specs:
+        hit_idx = np.flatnonzero(hit)
+        for k in hit_idx:
+            rid = int(self._ball_geom_contact_rids[int(k)])
+            if rid >= 0 and rid in self.robot_specs:
                 active.add(rid)
         if not active:
             return None
@@ -1667,7 +1882,7 @@ class MultiRobotMujocoSim:
             if self._is_robot_protected(rid):
                 self._fall_candidate_frames[rid] = 0
                 continue
-            quat = self.data.qpos[spec.base_qpos_adr + 3 : spec.base_qpos_adr + 7]
+            quat = self.data.dof_pos[0][spec.base_qpos_adr + 3 : spec.base_qpos_adr + 7]
             rot_wb = _quat_to_rot_world_from_body(quat)
             upright_dot = float(rot_wb[2, 2])
             if not np.isfinite(upright_dot) or upright_dot >= FALL_UPRIGHT_DOT_MIN:
@@ -1678,8 +1893,8 @@ class MultiRobotMujocoSim:
             if fallen_frames < FALL_CONFIRM_FRAMES:
                 continue
             self._fall_candidate_frames[rid] = 0
-            x = float(self.data.qpos[spec.base_qpos_adr + 0])
-            y = float(self.data.qpos[spec.base_qpos_adr + 1])
+            x = float(self.data.dof_pos[0][spec.base_qpos_adr + 0])
+            y = float(self.data.dof_pos[0][spec.base_qpos_adr + 1])
             theta = float(self._yaw_from_quat(quat))
             self._robot_protect_pose[rid] = (x, y, theta)
             self._robot_protect_until[rid] = now + FALL_RESET_PROTECT_SEC
@@ -1694,12 +1909,11 @@ class MultiRobotMujocoSim:
     def _update_referee(self, dt: float):
         if self.referee is None:
             return
-        bid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "ball")
-        if bid < 0:
-            return
-        ball_x = float(self.data.xpos[bid][0])
-        ball_y = float(self.data.xpos[bid][1])
-        ball_z = float(self.data.xpos[bid][2])
+        ball_x, ball_y, ball_z = 0.0, 0.0, 0.075
+        if self._ball_body is not None:
+            p = np.asarray(self._ball_body.get_position(self.data), dtype=np.float64).reshape(-1)
+            if p.size >= 3:
+                ball_x, ball_y, ball_z = float(p[0]), float(p[1]), float(p[2])
         active_touch = self._detect_ball_contact_rid()
         if active_touch is not None:
             self._ball_last_touch_rid = active_touch
@@ -1709,37 +1923,33 @@ class MultiRobotMujocoSim:
             self.teleport_ball(float(place[0]), float(place[1]), None)
 
     def _get_ball_state(self):
-        jid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "ball-root")
-        if jid < 0:
+        if self._ball_qpos_adr is None or self._ball_qvel_adr is None:
             return None
-        qpos_adr = int(self.model.jnt_qposadr[jid])
-        qvel_adr = int(self.model.jnt_dofadr[jid])
+        qpos_adr = int(self._ball_qpos_adr)
+        qvel_adr = int(self._ball_qvel_adr)
         return {
-            "qpos": self.data.qpos[qpos_adr : qpos_adr + 7].copy(),
-            "qvel": self.data.qvel[qvel_adr : qvel_adr + 6].copy(),
+            "qpos": self.data.dof_pos[0][qpos_adr : qpos_adr + 7].copy(),
+            "qvel": self.data.dof_vel[0][qvel_adr : qvel_adr + 6].copy(),
         }
 
     def _get_all_robot_states(self):
         out = {}
         for rid, spec in self.robot_specs.items():
             out[rid] = {
-                "base_qpos": self.data.qpos[spec.base_qpos_adr : spec.base_qpos_adr + 7].copy(),
-                "base_qvel": self.data.qvel[spec.base_qvel_adr : spec.base_qvel_adr + 6].copy(),
-                "joint_qpos": self.data.qpos[spec.qpos_idx].copy(),
-                "joint_qvel": self.data.qvel[spec.qvel_idx].copy(),
+                "base_qpos": self.data.dof_pos[0][spec.base_qpos_adr : spec.base_qpos_adr + 7].copy(),
+                "base_qvel": self.data.dof_vel[0][spec.base_qvel_adr : spec.base_qvel_adr + 6].copy(),
+                "joint_qpos": self.data.dof_pos[0][spec.qpos_idx].copy(),
+                "joint_qvel": self.data.dof_vel[0][spec.qvel_idx].copy(),
             }
         return out
 
     def _restore_ball_state(self, state):
-        if state is None:
+        if state is None or self._ball_qpos_adr is None or self._ball_qvel_adr is None:
             return
-        jid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "ball-root")
-        if jid < 0:
-            return
-        qpos_adr = int(self.model.jnt_qposadr[jid])
-        qvel_adr = int(self.model.jnt_dofadr[jid])
-        self.data.qpos[qpos_adr : qpos_adr + 7] = state["qpos"]
-        self.data.qvel[qvel_adr : qvel_adr + 6] = state["qvel"]
+        qpos_adr = int(self._ball_qpos_adr)
+        qvel_adr = int(self._ball_qvel_adr)
+        self.data.dof_pos[0][qpos_adr : qpos_adr + 7] = state["qpos"]
+        self.data.dof_vel[0][qvel_adr : qvel_adr + 6] = state["qvel"]
 
     def _restore_all_robot_states(self, states):
         if not states:
@@ -1748,22 +1958,22 @@ class MultiRobotMujocoSim:
             spec = self.robot_specs.get(rid)
             if spec is None:
                 continue
-            self.data.qpos[spec.base_qpos_adr : spec.base_qpos_adr + 7] = state["base_qpos"]
-            self.data.qvel[spec.base_qvel_adr : spec.base_qvel_adr + 6] = state["base_qvel"]
-            self.data.qpos[spec.qpos_idx] = state["joint_qpos"]
-            self.data.qvel[spec.qvel_idx] = state["joint_qvel"]
+            self.data.dof_pos[0][spec.base_qpos_adr : spec.base_qpos_adr + 7] = state["base_qpos"]
+            self.data.dof_vel[0][spec.base_qvel_adr : spec.base_qvel_adr + 6] = state["base_qvel"]
+            self.data.dof_pos[0][spec.qpos_idx] = state["joint_qpos"]
+            self.data.dof_vel[0][spec.qvel_idx] = state["joint_qvel"]
 
     def _reset_one_robot(self, spec: RobotSpec):
-        self.data.qpos[spec.base_qpos_adr : spec.base_qpos_adr + 7] = self._startup_qpos[spec.base_qpos_adr : spec.base_qpos_adr + 7]
-        self.data.qvel[spec.base_qvel_adr : spec.base_qvel_adr + 6] = self._startup_qvel[spec.base_qvel_adr : spec.base_qvel_adr + 6]
-        self.data.qpos[spec.qpos_idx] = self._startup_qpos[spec.qpos_idx]
-        self.data.qvel[spec.qvel_idx] = self._startup_qvel[spec.qvel_idx]
+        self.data.dof_pos[0][spec.base_qpos_adr : spec.base_qpos_adr + 7] = self._startup_qpos[spec.base_qpos_adr : spec.base_qpos_adr + 7]
+        self.data.dof_vel[0][spec.base_qvel_adr : spec.base_qvel_adr + 6] = self._startup_qvel[spec.base_qvel_adr : spec.base_qvel_adr + 6]
+        self.data.dof_pos[0][spec.qpos_idx] = self._startup_qpos[spec.qpos_idx]
+        self.data.dof_vel[0][spec.qvel_idx] = self._startup_qvel[spec.qvel_idx]
         if spec.pi_qpos_idx_mujoco is not None and spec.pi_qvel_idx_mujoco is not None:
-            self.data.qpos[spec.pi_qpos_idx_mujoco] = self._startup_qpos[spec.pi_qpos_idx_mujoco]
-            self.data.qvel[spec.pi_qvel_idx_mujoco] = self._startup_qvel[spec.pi_qvel_idx_mujoco]
-        self.data.ctrl[spec.act_idx] = self._startup_ctrl[spec.act_idx]
+            self.data.dof_pos[0][spec.pi_qpos_idx_mujoco] = self._startup_qpos[spec.pi_qpos_idx_mujoco]
+            self.data.dof_vel[0][spec.pi_qvel_idx_mujoco] = self._startup_qvel[spec.pi_qvel_idx_mujoco]
+        self.data.actuator_ctrls[0][spec.act_idx] = self._startup_ctrl[spec.act_idx]
         if spec.pi_act_idx_mujoco is not None:
-            self.data.ctrl[spec.pi_act_idx_mujoco] = self._startup_ctrl[spec.pi_act_idx_mujoco]
+            self.data.actuator_ctrls[0][spec.pi_act_idx_mujoco] = self._startup_ctrl[spec.pi_act_idx_mujoco]
         spec.last_action[:] = 0.0
         spec.filtered_dof_target[:] = spec.init_angles
         spec.target_joint_pos[:] = spec.init_angles
@@ -1773,10 +1983,10 @@ class MultiRobotMujocoSim:
 
     def _hold_robot_at_reset_pose(self, spec: RobotSpec, x: float, y: float, theta: float):
         self._reset_one_robot(spec)
-        self.data.qpos[spec.base_qpos_adr + 0] = float(x)
-        self.data.qpos[spec.base_qpos_adr + 1] = float(y)
-        self.data.qpos[spec.base_qpos_adr + 3 : spec.base_qpos_adr + 7] = _quat_from_yaw(float(theta))
-        self.data.qvel[spec.base_qvel_adr : spec.base_qvel_adr + 6] = 0.0
+        self.data.dof_pos[0][spec.base_qpos_adr + 0] = float(x)
+        self.data.dof_pos[0][spec.base_qpos_adr + 1] = float(y)
+        self.data.dof_pos[0][spec.base_qpos_adr + 3 : spec.base_qpos_adr + 7] = _quat_from_yaw(float(theta))
+        self.data.dof_vel[0][spec.base_qvel_adr : spec.base_qvel_adr + 6] = 0.0
         self.command_buffer[spec.rid] = np.array(DEFAULT_CMD, dtype=np.float32)
         self.command_ts[spec.rid] = float("-inf")
         self.command_received[spec.rid] = True
@@ -1812,12 +2022,10 @@ class MultiRobotMujocoSim:
 
     def reset(self, preserve_ball: bool = True, reset_referee: bool = True):
         ball_state = self._get_ball_state() if preserve_ball else None
-        self.data = mujoco.MjData(self.model)
-        self.data.qpos[:] = self._startup_qpos
-        self.data.qvel[:] = self._startup_qvel
-        self.data.ctrl[:] = self._startup_ctrl
-        if self.data.act.size > 0 and self._startup_act.size == self.data.act.size:
-            self.data.act[:] = self._startup_act
+        self.data = mtx.SceneData(self.model, batch=[1])
+        self.data.dof_pos[0][:] = self._startup_qpos
+        self.data.dof_vel[0][:] = self._startup_qvel
+        self.data.actuator_ctrls[0][:] = self._startup_ctrl
         self._apply_saved_spawn_points()
         self._restore_ball_state(ball_state)
         for spec in self.robot_specs.values():
@@ -1842,7 +2050,7 @@ class MultiRobotMujocoSim:
         self.last_msg_info = {"timestamp": 0.0, "id": -1, "source": "unknown"}
         self._policy_step_count = 0
         self._printed_target_policy_io = False
-        mujoco.mj_forward(self.model, self.data)
+        self.model.forward_kinematic(self.data)
 
     def set_spawn_points(self, spawn_points: dict[str, list[float]]):
         cleaned: dict[str, list[float]] = {}
@@ -1868,55 +2076,53 @@ class MultiRobotMujocoSim:
             x, y = float(arr[0]), float(arr[1])
             theta = float(arr[2]) if len(arr) >= 3 else 0.0
             if name == "ball":
-                jid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "ball-root")
-                if jid < 0:
+                if self._ball_qpos_adr is None or self._ball_qvel_adr is None:
                     continue
-                qpos_adr = int(self.model.jnt_qposadr[jid])
-                qvel_adr = int(self.model.jnt_dofadr[jid])
+                qpos_adr = int(self._ball_qpos_adr)
+                qvel_adr = int(self._ball_qvel_adr)
                 z = float(self._startup_qpos[qpos_adr + 2])
-                self.data.qpos[qpos_adr + 0] = x
-                self.data.qpos[qpos_adr + 1] = y
-                self.data.qpos[qpos_adr + 2] = z
-                self.data.qpos[qpos_adr + 3 : qpos_adr + 7] = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
-                self.data.qvel[qvel_adr : qvel_adr + 6] = 0.0
+                self.data.dof_pos[0][qpos_adr + 0] = x
+                self.data.dof_pos[0][qpos_adr + 1] = y
+                self.data.dof_pos[0][qpos_adr + 2] = z
+                self.data.dof_pos[0][qpos_adr + 3 : qpos_adr + 7] = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+                self.data.dof_vel[0][qvel_adr : qvel_adr + 6] = 0.0
                 continue
             rid = FIXED_ROBOT_NAME_TO_ID.get(name)
             if rid is None or rid not in self.robot_specs:
                 continue
             spec = self.robot_specs[rid]
-            self.data.qpos[spec.base_qpos_adr + 0] = x
-            self.data.qpos[spec.base_qpos_adr + 1] = y
-            self.data.qpos[spec.base_qpos_adr + 3 : spec.base_qpos_adr + 7] = _quat_from_yaw(theta)
-            self.data.qvel[spec.base_qvel_adr : spec.base_qvel_adr + 6] = 0.0
+            self.data.dof_pos[0][spec.base_qpos_adr + 0] = x
+            self.data.dof_pos[0][spec.base_qpos_adr + 1] = y
+            self.data.dof_pos[0][spec.base_qpos_adr + 3 : spec.base_qpos_adr + 7] = _quat_from_yaw(theta)
+            self.data.dof_vel[0][spec.base_qvel_adr : spec.base_qvel_adr + 6] = 0.0
 
     def teleport_robot(self, robot_name: str, x: float, y: float, theta: float | None):
         rid = FIXED_ROBOT_NAME_TO_ID.get(robot_name, None)
         if rid is None or rid not in self.robot_specs:
             return
         spec = self.robot_specs[rid]
-        cur_theta = self._yaw_from_quat(self.data.qpos[spec.base_qpos_adr + 3 : spec.base_qpos_adr + 7])
+        cur_theta = self._yaw_from_quat(self.data.dof_pos[0][spec.base_qpos_adr + 3 : spec.base_qpos_adr + 7])
         target_theta = cur_theta if theta is None else float(theta)
         # Dragging a robot on minimap should only reset/reposition this robot.
         self._robot_protect_pose[rid] = (float(x), float(y), target_theta)
         self._robot_protect_until[rid] = time.monotonic() + DRAG_RESET_PROTECT_SEC
         self._robot_cmd_zero_frames_left[rid] = DRAG_CMD_ZERO_POLICY_FRAMES
         self._hold_robot_at_reset_pose(spec, float(x), float(y), target_theta)
-        mujoco.mj_forward(self.model, self.data)
+        self.model.forward_kinematic(self.data)
 
     def teleport_ball(self, x: float, y: float, z: float | None):
-        jid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "ball-root")
-        if jid < 0:
+        if self._ball_qpos_adr is None or self._ball_qvel_adr is None:
             return
-        qpos_adr = int(self.model.jnt_qposadr[jid])
-        qvel_adr = int(self.model.jnt_dofadr[jid])
+        qpos_adr = int(self._ball_qpos_adr)
+        qvel_adr = int(self._ball_qvel_adr)
         if z is None:
-            z = float(self.data.qpos[qpos_adr + 2])
-        self.data.qpos[qpos_adr + 0] = float(x)
-        self.data.qpos[qpos_adr + 1] = float(y)
-        self.data.qpos[qpos_adr + 2] = float(z)
-        self.data.qpos[qpos_adr + 3 : qpos_adr + 7] = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
-        self.data.qvel[qvel_adr : qvel_adr + 6] = 0.0
-        mujoco.mj_forward(self.model, self.data)
+            z = float(self.data.dof_pos[0][qpos_adr + 2])
+        self.data.dof_pos[0][qpos_adr + 0] = float(x)
+        self.data.dof_pos[0][qpos_adr + 1] = float(y)
+        self.data.dof_pos[0][qpos_adr + 2] = float(z)
+        self.data.dof_pos[0][qpos_adr + 3 : qpos_adr + 7] = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        self.data.dof_vel[0][qvel_adr : qvel_adr + 6] = 0.0
+        self.model.forward_kinematic(self.data)
 
     def _yaw_from_quat(self, quat_wxyz: np.ndarray) -> float:
         qw, qx, qy, qz = quat_wxyz
@@ -1927,10 +2133,10 @@ class MultiRobotMujocoSim:
         for rid, name in FIXED_ROBOT_ID_TO_NAME.items():
             if rid in self.robot_specs:
                 spec = self.robot_specs[rid]
-                x = float(self.data.qpos[spec.base_qpos_adr + 0])
-                y = float(self.data.qpos[spec.base_qpos_adr + 1])
-                z = float(self.data.qpos[spec.base_qpos_adr + 2])
-                quat = self.data.qpos[spec.base_qpos_adr + 3 : spec.base_qpos_adr + 7]
+                x = float(self.data.dof_pos[0][spec.base_qpos_adr + 0])
+                y = float(self.data.dof_pos[0][spec.base_qpos_adr + 1])
+                z = float(self.data.dof_pos[0][spec.base_qpos_adr + 2])
+                quat = self.data.dof_pos[0][spec.base_qpos_adr + 3 : spec.base_qpos_adr + 7]
                 cmd = self.command_buffer.get(rid, np.array(DEFAULT_CMD, dtype=np.float32))
                 states[name] = {
                     "x": x,
@@ -1953,24 +2159,74 @@ class MultiRobotMujocoSim:
                 }
 
         ball_x, ball_y, ball_z = 0.0, 0.0, 0.075
-        bid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "ball")
-        if bid >= 0:
-            ball_x = float(self.data.xpos[bid][0])
-            ball_y = float(self.data.xpos[bid][1])
-            ball_z = float(self.data.xpos[bid][2])
+        if self._ball_body is not None:
+            p = np.asarray(self._ball_body.get_position(self.data), dtype=np.float64).reshape(-1)
+            if p.size >= 3:
+                ball_x, ball_y, ball_z = float(p[0]), float(p[1]), float(p[2])
         states["ball"] = {"x": ball_x, "y": ball_y, "z": ball_z, "yaw": 0.0, "active": True, "team": "none"}
         if self.referee is not None:
             states["_game"] = self.referee.game_state_dict()
         states["_last_msg"] = dict(self.last_msg_info)
         return states
 
+    def _render_topdown_web_frame(self, width: int, height: int) -> np.ndarray:
+        """Fallback frame when Motrix capture is unavailable: draw a simple top-down field view."""
+        h = max(1, int(height))
+        w = max(1, int(width))
+        img = np.zeros((h, w, 3), dtype=np.uint8)
+        img[:, :, :] = np.array([32, 110, 45], dtype=np.uint8)  # grass-like background
+
+        world_l = max(1e-6, float(self._world_length))
+        world_w = max(1e-6, float(self._world_width))
+        sx = w / world_l
+        sy = h / world_w
+        cx = 0.5 * w
+        cy = 0.5 * h
+
+        def to_px(x: float, y: float) -> tuple[int, int]:
+            px = int(round(cx + float(x) * sx))
+            py = int(round(cy - float(y) * sy))
+            return px, py
+
+        # Draw field border.
+        half_l = 0.5 * float(self._field_length)
+        half_w = 0.5 * float(self._field_width)
+        x0, y0 = to_px(-half_l, half_w)
+        x1, y1 = to_px(half_l, -half_w)
+        xa, xb = sorted((x0, x1))
+        ya, yb = sorted((y0, y1))
+        img[max(0, ya) : min(h, ya + 2), max(0, xa) : min(w, xb + 1)] = 230
+        img[max(0, yb - 1) : min(h, yb + 1), max(0, xa) : min(w, xb + 1)] = 230
+        img[max(0, ya) : min(h, yb + 1), max(0, xa) : min(w, xa + 2)] = 230
+        img[max(0, ya) : min(h, yb + 1), max(0, xb - 1) : min(w, xb + 1)] = 230
+
+        states = self.state_for_web()
+        ball = states.get("ball", {})
+        bx, by = to_px(float(ball.get("x", 0.0)), float(ball.get("y", 0.0)))
+        rr = max(2, int(round(0.08 * min(sx, sy))))
+        yy, xx = np.ogrid[:h, :w]
+        mask_ball = (xx - bx) * (xx - bx) + (yy - by) * (yy - by) <= rr * rr
+        img[mask_ball] = np.array([245, 245, 245], dtype=np.uint8)
+
+        for rid, name in FIXED_ROBOT_ID_TO_NAME.items():
+            st = states.get(name, None)
+            if not isinstance(st, dict) or not bool(st.get("active", False)):
+                continue
+            rx, ry = to_px(float(st.get("x", 0.0)), float(st.get("y", 0.0)))
+            team = str(st.get("team", "none"))
+            color = np.array([220, 60, 60], dtype=np.uint8) if team == "red" else np.array([70, 120, 240], dtype=np.uint8)
+            rr = max(3, int(round(0.11 * min(sx, sy))))
+            mask = (xx - rx) * (xx - rx) + (yy - ry) * (yy - ry) <= rr * rr
+            img[mask] = color
+        return img
+
     def state_for_zmq(self) -> dict:
         robots = []
         for rid in self.active_robot_ids:
             spec = self.robot_specs[rid]
-            x = float(self.data.qpos[spec.base_qpos_adr + 0])
-            y = float(self.data.qpos[spec.base_qpos_adr + 1])
-            quat = self.data.qpos[spec.base_qpos_adr + 3 : spec.base_qpos_adr + 7]
+            x = float(self.data.dof_pos[0][spec.base_qpos_adr + 0])
+            y = float(self.data.dof_pos[0][spec.base_qpos_adr + 1])
+            quat = self.data.dof_pos[0][spec.base_qpos_adr + 3 : spec.base_qpos_adr + 7]
             robots.append(
                 {
                     "id": rid,
@@ -1983,9 +2239,10 @@ class MultiRobotMujocoSim:
             )
 
         ball_x, ball_y, ball_z = 0.0, 0.0, 0.075
-        bid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "ball")
-        if bid >= 0:
-            ball_x, ball_y, ball_z = (float(v) for v in self.data.xpos[bid])
+        if self._ball_body is not None:
+            p = np.asarray(self._ball_body.get_position(self.data), dtype=np.float64).reshape(-1)
+            if p.size >= 3:
+                ball_x, ball_y, ball_z = float(p[0]), float(p[1]), float(p[2])
 
         out = {"robots": robots, "ball": {"x": ball_x, "y": ball_y, "z": ball_z}}
         if self.referee is not None:
@@ -2028,14 +2285,12 @@ class MultiRobotMujocoSim:
             try:
                 if w <= 0 or h <= 0:
                     continue
-                renderer = mujoco.Renderer(self.model, width=w, height=h)
-                if (w, h) != (width, height):
-                    print(f"[MujocoWebView] Renderer fallback resolution: {w}x{h}")
-                return renderer
+                return _MotrixHeadlessRenderer(self.model, w, h)
             except Exception as e:
                 last_err = e
-        print(f"[MujocoWebView] Renderer unavailable, running without video stream: {last_err}")
-        return None
+        print(f"[MotrixWebView] Headless renderer unavailable, using black frames: {last_err}")
+        h0, w0 = candidates[-1][1], candidates[-1][0]
+        return _BlackFrameRenderer(h0, w0)
 
     def _apply_web_commands(self, cmds, counter: int) -> tuple[int, bool]:
         reset_triggered = False
@@ -2111,7 +2366,10 @@ class MultiRobotMujocoSim:
         context = zmq.Context()
         socket = context.socket(zmq.REP)
         socket.bind(f"tcp://*:{port}")
-        print(f"[MujocoZMQ] Bound to tcp://*:{port}")
+        print(f"[MotrixZMQ] Bound to tcp://*:{port}")
+        use_real_time = bool(self.args.real_time or (webview is not None))
+        if webview is not None and not self.args.real_time:
+            print("[MotrixWebView] forcing real-time stepping for web responsiveness")
 
         renderer = None
         frame_interval = 1.0 / max(1, web_fps)
@@ -2120,9 +2378,7 @@ class MultiRobotMujocoSim:
         next_state_emit_time = time.time()
         if webview is not None:
             renderer = self._safe_create_renderer(width=width, height=height)
-            self._web_camera = mujoco.MjvCamera()
-            mujoco.mjv_defaultCamera(self._web_camera)
-            self._web_camera.type = mujoco.mjtCamera.mjCAMERA_FREE
+            self._web_camera = _FreeCameraView()
             self._apply_camera_preset("Diagonal")
 
         counter = 0
@@ -2184,17 +2440,7 @@ class MultiRobotMujocoSim:
                 if webview is not None:
                     now = time.time()
                     if renderer is not None and now >= next_frame_time:
-                        if self._render_scene_option is not None:
-                            try:
-                                renderer.update_scene(
-                                    self.data,
-                                    camera=self._web_camera,
-                                    scene_option=self._render_scene_option,
-                                )
-                            except TypeError:
-                                renderer.update_scene(self.data, camera=self._web_camera)
-                        else:
-                            renderer.update_scene(self.data, camera=self._web_camera)
+                        renderer.update_scene(self.data, camera=self._web_camera)
                         frame = renderer.render()
                         webview.emit_frame(frame)
                         next_frame_time = now + frame_interval
@@ -2202,10 +2448,16 @@ class MultiRobotMujocoSim:
                         webview.emit_robot_states(self.state_for_web())
                         next_state_emit_time = now + state_emit_interval
 
-                if self.args.real_time:
-                    wait_time = self.model.opt.timestep - (time.time() - step_start)
+                if use_real_time:
+                    wait_time = float(self.model.options.timestep) - (time.time() - step_start)
                     if wait_time > 0:
                         time.sleep(wait_time)
+                else:
+                    time.sleep(0)
+                if webview is not None:
+                    # Always yield a little time slice so Flask-SocketIO thread can serve
+                    # /api/states, /api/frame.jpg and socket heartbeats reliably.
+                    time.sleep(0.001)
         finally:
             socket.close()
             context.term()
@@ -2214,14 +2466,26 @@ class MultiRobotMujocoSim:
 
 
 def run_sim(args: RuntimeArgs, template_dir: Path):
-    sim = MultiRobotMujocoSim(args)
+    sim = MultiRobotMotrixSim(args)
     webview = None
     if args.webview:
+        # Avoid silently attaching to a stale viewer process on the same port.
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                s.bind(("0.0.0.0", int(args.webview_port)))
+            except OSError as e:
+                raise RuntimeError(
+                    f"WebView port {args.webview_port} is already in use. "
+                    "Please stop stale sim/webview processes or choose a different --webview-port."
+                ) from e
         webview = MujocoLabWebView(
             template_dir=template_dir,
             allow_keyboard_control=args.allow_keyboard_control,
         )
         webview.start(port=args.webview_port)
+        # Let the Flask/Socket.IO thread bind before we broadcast field_meta from the main thread.
+        time.sleep(0.15)
         webview.set_field_meta(
             {
                 "world_length": sim._world_length,
@@ -2239,15 +2503,22 @@ def run_sim(args: RuntimeArgs, template_dir: Path):
                 },
             }
         )
-        print(f"[MujocoWebView] Started at http://localhost:{args.webview_port}")
+        print(f"[MotrixWebView] Started at http://localhost:{args.webview_port}")
 
     if not args.zmq:
         raise ValueError("ZMQ is required in simplified runner. Use default --zmq.")
 
-    sim.zmq_loop(
-        port=args.port,
-        webview=webview,
-        web_fps=args.web_fps,
-        width=args.web_width,
-        height=args.web_height,
-    )
+    try:
+        sim.zmq_loop(
+            port=args.port,
+            webview=webview,
+            web_fps=args.web_fps,
+            width=args.web_width,
+            height=args.web_height,
+        )
+    finally:
+        if webview is not None:
+            try:
+                webview.close()
+            except Exception:
+                pass

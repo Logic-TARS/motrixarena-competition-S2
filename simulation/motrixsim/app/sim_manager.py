@@ -8,6 +8,7 @@ import os
 import signal
 import socket
 import subprocess
+import sys
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -20,7 +21,13 @@ from pydantic import BaseModel, Field
 
 
 MUJOCO_DIR = Path(__file__).resolve().parents[1]
-PYTHON_BIN = Path(os.environ.get("PYTHON", "python"))
+# Use current interpreter by default so spawned sims share the same conda/venv.
+# Only honor $PYTHON when it is an explicit existing path (ignore bare "python").
+_python_env = os.environ.get("PYTHON", "").strip()
+if _python_env and Path(_python_env).exists():
+    PYTHON_BIN = Path(_python_env)
+else:
+    PYTHON_BIN = Path(sys.executable)
 REGISTRY_PATH = MUJOCO_DIR / ".sim_manager_registry.json"
 MANAGER_WEB_DIR = MUJOCO_DIR / "web" / "manager"
 MANAGER_INDEX_HTML = MANAGER_WEB_DIR / "index.html"

@@ -68,10 +68,12 @@ pip install -r decider/requirements.txt
 
 Sim Manager 是一个基于 FastAPI 的网页管理器，可以在浏览器中可视化地启动、停止和管理多个仿真实例，并自动生成 Decider 启动命令。
 
+
+####################################2026-05-12####################
 ### 2.1 启动 Manager 服务
 ```
 cd ./sim_soccer2
-conda activate mujoco0508
+conda activate motrixsim0508
 python simulation/motrixsim/sim_manager.py --host 0.0.0.0 --port 8000
 ```
 
@@ -177,7 +179,7 @@ screen -r decider_red_0     # 进入会话；按 Ctrl+A 然后 D 退出
 
 ```bash
 cd ./sim_soccer2/simulation/motrixsim
-conda run -n motrixsim0508 python sim2sim_runner.py --team-size 3
+conda run -n motrixsim0508 python sim2sim_runner.py --team-size 3 --real-time
 ```
 
 默认端口：
@@ -196,7 +198,7 @@ conda run -n motrixsim0508 python sim2sim_runner.py --team-size 3
 示例（启动 `pi_plus`）：
 
 ```bash
-conda run -n motrixsim0508 python sim2sim_runner.py --robot-type pi_plus --team-size 3
+conda run -n motrixsim0508 python sim2sim_runner.py --robot-type pi_plus --team-size 3 --real-time
 ```
 
 ### 固定 Robot ID 映射
