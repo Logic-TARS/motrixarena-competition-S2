@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 
 MODULE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = MODULE_DIR.parent
-DEFAULT_SIM_ROOT = Path(os.environ.get("LABBRIDGE_SIM_ROOT", str(PROJECT_ROOT / "mujoco"))).resolve()
+DEFAULT_SIM_ROOT = Path(os.environ.get("LABBRIDGE_SIM_ROOT", str(PROJECT_ROOT / "motrixsim"))).resolve()
 DEFAULT_RUNNER = Path(
     os.environ.get("LABBRIDGE_SIM_RUNNER", str(DEFAULT_SIM_ROOT / "sim2sim_runner.py"))
 ).resolve()

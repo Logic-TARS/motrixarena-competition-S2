@@ -1,6 +1,6 @@
 # labbridge
 
-独立的桥接模块目录，和 `mujoco` 解耦，包含 3 个核心模块：
+独立的桥接模块目录，和 `motrixsim` 解耦，包含 3 个核心模块：
 
 - `genesis_bridge.py`：Genesis 主循环接入 WebView 的桥接器
 - `webview_server.py`：SocketIO + HTML 模板的 WebView 服务

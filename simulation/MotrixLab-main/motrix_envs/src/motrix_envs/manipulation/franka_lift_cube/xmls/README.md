@@ -1,7 +1,7 @@
 # Franka Emika Panda Description (MJCF)
 
 > [!IMPORTANT]
-> Requires MuJoCo 2.3.3 or later.
+> Requires MotrixSim 2.3.3 or later.
 
 ## Changelog
 
@@ -29,10 +29,10 @@ description](https://github.com/frankaemika/franka_ros/tree/develop/franka_descr
 4. Created a convex decomposition of the STL collision [mesh
    file](https://github.com/frankaemika/franka_ros/tree/develop/franka_description/meshes/collision)
    for `link5` using [V-HACD](https://github.com/kmammou/v-hacd).
-5. Added `<mujoco> <compiler discardvisual="false"/> </mujoco>` to the
+5. Added a MotrixSim model preamble with `<compiler discardvisual="false"/>` to the
    [URDF](https://github.com/frankaemika/franka_ros/tree/develop/franka_description/robots)'s
    `<robot>` clause in order to preserve visual geometries.
-6. Loaded the URDF into MuJoCo and saved a corresponding MJCF.
+6. Loaded the URDF into MotrixSim and saved a corresponding MJCF.
 7. Matched inertial parameters with [inertial.yaml](https://github.com/frankaemika/franka_ros/blob/develop/franka_description/robots/common/inertial.yaml).
 8. Added a tracking light to the base.
 9. Manually edited the MJCF to extract common properties into the `<default>` section.

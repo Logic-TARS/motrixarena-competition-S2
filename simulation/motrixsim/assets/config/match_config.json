@@ -5,11 +5,12 @@
         "length": 9.0,
         "width": 6.0,
         "goal": {
-            "_comment": "Goal dimensions in meters",
+            "_comment": "Goal dimensions in meters (for referee/overlay). procedural_goals: add MuJoCo box net posts in code; set false when world mesh already includes goals (e.g. Soccer_field).",
             "depth": 1.0,
             "width": 1.9,
             "height": 1.8,
-            "post_radius": 0.05
+            "post_radius": 0.05,
+            "procedural_goals": false
         },
         "markings": {
             "_comment": "White line layout on top of pitch",

@@ -396,12 +396,13 @@ def _load_field_size_from_match_config(match_config_path: Path | None) -> tuple[
     return None
 
 
-def _load_goal_config_from_match_config(match_config_path: Path | None) -> dict[str, float]:
-    cfg = {
+def _load_goal_config_from_match_config(match_config_path: Path | None) -> dict[str, object]:
+    cfg: dict[str, object] = {
         "depth": 0.6,
         "width": 2.6,
         "height": 1.8,
         "post_radius": 0.05,
+        "procedural_goals": True,
     }
     if match_config_path is None or not match_config_path.exists():
         return cfg
@@ -419,6 +420,8 @@ def _load_goal_config_from_match_config(match_config_path: Path | None) -> dict[
             cfg["height"] = float(goal_cfg["height"])
         if "post_radius" in goal_cfg:
             cfg["post_radius"] = float(goal_cfg["post_radius"])
+        if "procedural_goals" in goal_cfg:
+            cfg["procedural_goals"] = bool(goal_cfg["procedural_goals"])
     except Exception:
         pass
     return cfg
@@ -1128,7 +1131,7 @@ def _build_multi_robot_soccer_scene_xml(
     base_joint_name: str,
     pitch_scale: float = PITCH_SCALE,
     target_field_size: tuple[float, float] | None = None,
-    goal_cfg: dict[str, float] | None = None,
+    goal_cfg: dict[str, object] | None = None,
     outer_floor_cfg: dict[str, object] | None = None,
     field_markings_cfg: dict[str, object] | None = None,
     spawn_positions_cfg: dict[str, list[tuple[float, float, float]]] | None = None,
@@ -1276,14 +1279,15 @@ def _build_multi_robot_soccer_scene_xml(
     _add_field_markings(worldbody, field_length=out_field_len, field_width=out_field_wid, cfg=field_markings_cfg)
 
     g = goal_cfg if isinstance(goal_cfg, dict) else {}
-    _add_procedural_goals(
-        worldbody,
-        field_length=out_field_len,
-        goal_depth=float(g.get("depth", 0.6)),
-        goal_width=float(g.get("width", 2.6)),
-        goal_height=float(g.get("height", 1.8)),
-        post_radius=float(g.get("post_radius", 0.05)),
-    )
+    if bool(g.get("procedural_goals", True)):
+        _add_procedural_goals(
+            worldbody,
+            field_length=out_field_len,
+            goal_depth=float(g.get("depth", 0.6)),
+            goal_width=float(g.get("width", 2.6)),
+            goal_height=float(g.get("height", 1.8)),
+            post_radius=float(g.get("post_radius", 0.05)),
+        )
 
     xml_path = _write_temp_xml(ET.tostring(robot_root, encoding="unicode"))
     return xml_path, active_robot_ids

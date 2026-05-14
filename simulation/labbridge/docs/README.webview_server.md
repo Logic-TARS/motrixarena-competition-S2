@@ -39,7 +39,7 @@
 from pathlib import Path
 from simulation.labbridge import LabWebView
 
-web = LabWebView(template_dir=Path("mujoco/web/templates"))
+web = LabWebView(template_dir=Path("motrixsim/web/templates"))
 web.start(port=5811)
 
 while True:

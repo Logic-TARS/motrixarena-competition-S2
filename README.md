@@ -20,7 +20,7 @@
 
 ## 一、项目概述
 
-**sim-soccer** 是一个面向双足 / 多足机器人（如 **K1**、**Pi Plus**）的足球竞技仿真与决策控制项目。它在虚拟环境中（MuJoCo / Isaac Sim）还原足球比赛场景，并为研究者提供一套完整的感知—决策—控制框架，可用于多智能体策略的研究、比赛训练和算法验证。
+**sim-soccer** 是一个面向双足 / 多足机器人（如 **K1**、**Pi Plus**）的足球竞技仿真与决策控制项目。它在虚拟环境中（MotrixSim / Isaac Sim）还原足球比赛场景，并为研究者提供一套完整的感知—决策—控制框架，可用于多智能体策略的研究、比赛训练和算法验证。
 
 项目将**物理仿真、进程管理、网络通信**等底层复杂性全部封装，上层开发者只需使用简洁的 Python API，即可专注于编写多机器人的足球竞技策略。
 
@@ -43,7 +43,7 @@ mos-sim/
 │   │   └── policy_statemachines/  # 策略级状态机（守门员等）
 │   └── scripts/               # 整队启动、部署脚本
 └── simulation/                # 仿真模块
-    ├── mujoco/                # MuJoCo 仿真环境（主推）
+    ├── motrixsim/             # MotrixSim 仿真环境（主推）
     ├── isaac_sim/             # Isaac Sim 仿真环境（旧版）
     └── labbridge/             # WebView / Bridge / Sim Manager
 ```
@@ -54,8 +54,8 @@ mos-sim/
 
 ### 2.2 Simulation 仿真模块（`simulation/`）
 
-- **`mujoco/`**：基于 MuJoCo 的物理仿真环境，**当前主推的仿真引擎**，附带基于 FastAPI 的可视化管理器（Sim Manager），方便在网页端启停和管理多个仿真实例。
-- **`isaac_sim/`**：基于 NVIDIA Isaac Sim 的仿真环境（旧版，主实现已迁移到 MuJoCo）。
+- **`motrixsim/`**：基于 MotrixSim 的物理仿真环境，**当前主推的仿真引擎**，附带基于 FastAPI 的可视化管理器（Sim Manager），方便在网页端启停和管理多个仿真实例。
+- **`isaac_sim/`**：基于 NVIDIA Isaac Sim 的仿真环境（旧版，主实现已迁移到 MotrixSim）。
 - **`labbridge/`**：独立的 WebView、通信桥梁（Bridge）以及仿真进程管理模块，负责仿真环境与外部界面的通信。
 
 
