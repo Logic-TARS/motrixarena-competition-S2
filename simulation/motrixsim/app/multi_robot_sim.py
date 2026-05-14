@@ -696,12 +696,14 @@ def _ensure_default_scene_camera_for_motrix(worldbody: ET.Element) -> None:
         return f"{x[0]:.7g} {x[1]:.7g} {x[2]:.7g} {y[0]:.7g} {y[1]:.7g} {y[2]:.7g}"
 
     existing = {str(ch.get("name", "")) for ch in worldbody if ch.tag == "camera"}
+    # WebView capture uses these MJCF cameras (see set_capture_camera / get_camera). Eye/look must match
+    # _apply_camera_preset in MultiRobotMotrixSim or preset buttons will not move the rendered view.
     presets = {
-        "lab_webview_diagonal": ((-10.0, -10.0, 10.0), (0.0, 0.0, 0.8)),
+        "lab_webview_diagonal": ((-8.0, -8.0, 8.0), (0.0, 0.0, 0.8)),
         "lab_webview_top": ((0.0, 0.0, 18.0), (0.0, 0.0, 0.8)),
-        "lab_webview_side": ((0.0, 12.0, 6.0), (0.0, 0.0, 0.8)),
-        "lab_webview_goal_left": ((-8.0, 0.0, 3.0), (0.0, 0.0, 0.9)),
-        "lab_webview_goal_right": ((8.0, 0.0, 3.0), (0.0, 0.0, 0.9)),
+        "lab_webview_side": ((0.0, 9.0, 6.0), (0.0, 0.0, 0.8)),
+        "lab_webview_goal_left": ((-8.5, 0.0, 6.0), (0.0, 0.0, 0.9)),
+        "lab_webview_goal_right": ((8.5, 0.0, 6.0), (0.0, 0.0, 0.9)),
     }
     for cam_name, (eye, look) in presets.items():
         if cam_name in existing:
@@ -2592,13 +2594,15 @@ class MultiRobotMotrixSim:
         self._web_camera.elevation = float(elevation)
 
     def _apply_camera_preset(self, preset: str):
+        # Eye/look must match lab_webview_* cameras in _ensure_default_scene_camera_for_motrix (MJCF poses
+        # drive Motrix headless capture; _web_camera alone is not enough for Diagonal/Side/Top).
         presets = {
             "Top": ((0.0, 0.0, 18.0), (0.0, 0.0, 0.8)),
             # Mirror side camera so field orientation matches the mini-map (red left, blue right).
-            "Side": ((0.0, 12.0, 6.0), (0.0, 0.0, 0.8)),
-            "Diagonal": ((-10.0, -10.0, 10.0), (0.0, 0.0, 0.8)),
-            "Goal_Left": ((-8.0, 0.0, 3.0), (0.0, 0.0, 0.9)),
-            "Goal_Right": ((8.0, 0.0, 3.0), (0.0, 0.0, 0.9)),
+            "Side": ((0.0, 9.0, 6.0), (0.0, 0.0, 0.8)),
+            "Diagonal": ((-8.0, -8.0, 8.0), (0.0, 0.0, 0.8)),
+            "Goal_Left": ((-8.5, 0.0, 6.0), (0.0, 0.0, 0.9)),
+            "Goal_Right": ((8.5, 0.0, 6.0), (0.0, 0.0, 0.9)),
         }
         preset_to_cam = {
             "Top": "lab_webview_top",
