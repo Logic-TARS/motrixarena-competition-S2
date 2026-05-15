@@ -28,6 +28,23 @@ from .runtime_config import (
     DEFAULT_CMD,
     FIXED_ROBOT_ID_TO_NAME,
     FIXED_ROBOT_NAME_TO_ID,
+    K1_FULL_BODY_NUM_ACT,
+    K1_FULL_BODY_NUM_OBS,
+    K1_LEGGED_GYM_ACTION_SCALE,
+    K1_LEGGED_GYM_DEFAULT_JOINT_ANGLES,
+    K1_LEGGED_GYM_DOF_POS_SCALE,
+    K1_LEGGED_GYM_DOF_VEL_SCALE,
+    K1_LEGGED_GYM_GAIT_FREQUENCY,
+    K1_LEGGED_GYM_GYRO_SCALE_LIN_VEL,
+    K1_LEGGED_GYM_GRAVITY_SCALE,
+    K1_LEGGED_GYM_KP,
+    K1_LEGGED_GYM_KD,
+    K1_LEGGED_GYM_LEG_JOINTS_POLICY_ORDER,
+    K1_LEGGED_GYM_NUM_ACT,
+    CMD_VEL_NORM_MAX,
+    CMD_VEL_NORM_MIN,
+    K1_LEGGED_GYM_NUM_OBS,
+    K1_LEGGED_GYM_TORQUE_LIMIT,
     K1_ROBOT_TYPE,
     MAX_ROBOTS_PER_TEAM,
     PI_PLUS_KD_POLICY_ORDER,
@@ -1376,6 +1393,12 @@ PI_PLUS_DEFAULT_DOF_POS_MUJOCO = np.asarray(
     dtype=np.float32,
 )
 
+# K1 walk/stand hybrid: body-frame command (vx, vy, yaw rate) gates legged vs full-body policy.
+K1_HYBRID_WALK_ENTER_LIN = 0.07
+K1_HYBRID_WALK_EXIT_LIN = 0.035
+K1_HYBRID_WALK_ENTER_YAW = 0.18
+K1_HYBRID_WALK_EXIT_YAW = 0.07
+
 
 @dataclass
 class RobotSpec:
@@ -1412,6 +1435,14 @@ class RobotSpec:
     joint_upper: np.ndarray | None = None
     pi_joint_lower_mujoco: np.ndarray | None = None
     pi_joint_upper_mujoco: np.ndarray | None = None
+    # When K1 hybrid stand policy is loaded: False = full-body stand (46000), True = legged walk (4700).
+    k1_hybrid_walking: bool = False
+    # legged_gym K1 locomotion (47-dim obs, 12 leg actions) — optional per-robot buffers.
+    k1_legged_last_action: np.ndarray | None = None
+    k1_legged_default_dof: np.ndarray | None = None
+    k1_legged_joint_indices: np.ndarray | None = None
+    k1_non_leg_mask: np.ndarray | None = None
+    k1_gait_phase: float | None = None
 
 
 class MultiRobotMotrixSim:
@@ -1453,7 +1484,10 @@ class MultiRobotMotrixSim:
             outer_floor_cfg=outer_floor_cfg,
             field_markings_cfg=field_markings_cfg,
             spawn_positions_cfg=spawn_positions_cfg,
-            keep_robot_sensors=(self.robot_cfg.robot_type == PI_PLUS_ROBOT_TYPE),
+            keep_robot_sensors=(
+                self.robot_cfg.robot_type == PI_PLUS_ROBOT_TYPE
+                or self.robot_cfg.use_k1_legged_gym_policy
+            ),
         )
 
         self.model = mtx.load_model(str(scene_xml))
@@ -1496,14 +1530,30 @@ class MultiRobotMotrixSim:
 
         self.policy_device = self._resolve_policy_device(args.policy_device)
         print(f"[MultiRobotMotrixSim] policy device: {self.policy_device}")
-        self.policy = self._load_policy(args.policy)
+        self._policy_is_onnx = False
+        self._policy_is_torchscript = False
+        self._ts_policy = None
+        self._onnx_session = None
+        self._onnx_input_name = ""
+        self._onnx_output_name = ""
+        self.policy: nn.Module | None = None
+        self._policy_obs_dim = 0
+        self._policy_action_dim = 0
+        self._init_policy(args.policy)
+        self._k1_stand_policy: nn.Module | None = None
+        if self.robot_cfg.k1_stand_policy is not None:
+            self._init_k1_stand_policy(self.robot_cfg.k1_stand_policy)
 
         self.robot_specs: dict[int, RobotSpec] = self._build_robot_specs()
         self._apply_team_body_colors()
         if self.robot_specs:
             sample_spec = next(iter(self.robot_specs.values()))
-            expected_obs_dim = len(sample_spec.obs_history)
-            expected_act_dim = len(sample_spec.last_action)
+            if self.robot_cfg.use_k1_legged_gym_policy:
+                expected_obs_dim = K1_LEGGED_GYM_NUM_OBS
+                expected_act_dim = K1_LEGGED_GYM_NUM_ACT
+            else:
+                expected_obs_dim = len(sample_spec.obs_history)
+                expected_act_dim = len(sample_spec.last_action)
             if expected_obs_dim != self._policy_obs_dim:
                 raise RuntimeError(
                     f"Policy obs dim mismatch: policy={self._policy_obs_dim} robot={expected_obs_dim} type={self.robot_cfg.robot_type}"
@@ -1593,7 +1643,83 @@ class MultiRobotMotrixSim:
             return torch.device("cpu")
         raise ValueError(f"Unsupported policy device: {requested}")
 
-    def _load_policy(self, policy_path: Path):
+    def _init_policy(self, policy_path: Path) -> None:
+        path = Path(policy_path)
+        if self.robot_cfg.use_k1_legged_gym_policy:
+            suf = path.suffix.lower()
+            if suf == ".onnx":
+                try:
+                    import onnxruntime as ort
+                except ImportError as e:
+                    raise RuntimeError(
+                        "Install onnxruntime to run the K1 legged_gym ONNX policy (pip install onnxruntime)."
+                    ) from e
+                if not path.is_file():
+                    raise FileNotFoundError(
+                        f"K1 legged_gym ONNX policy not found: {path}\n"
+                        "Place model_4700.onnx under legged_gym/policy/booster_k1/ or pass --policy."
+                    )
+                self._onnx_session = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
+                ins = self._onnx_session.get_inputs()
+                outs = self._onnx_session.get_outputs()
+                if len(ins) != 1 or len(outs) != 1:
+                    raise RuntimeError(f"Expected 1 ONNX input and 1 output; got {len(ins)} / {len(outs)}")
+                self._onnx_input_name = ins[0].name
+                self._onnx_output_name = outs[0].name
+                self._policy_obs_dim = K1_LEGGED_GYM_NUM_OBS
+                self._policy_action_dim = K1_LEGGED_GYM_NUM_ACT
+                self._policy_is_onnx = True
+                print(
+                    f"[MultiRobotMotrixSim] K1 legged_gym ONNX: {path} (obs_dim={self._policy_obs_dim}, act_dim={self._policy_action_dim})"
+                )
+                return
+
+            if suf == ".pt":
+                ts = None
+                try:
+                    ts = torch.jit.load(str(path), map_location=self.policy_device)
+                    ts.eval()
+                except Exception:
+                    ts = None
+                if ts is not None:
+                    with torch.inference_mode():
+                        probe = ts(torch.zeros(1, K1_LEGGED_GYM_NUM_OBS, device=self.policy_device))
+                    if int(probe.shape[-1]) != K1_LEGGED_GYM_NUM_ACT:
+                        raise RuntimeError(
+                            f"K1 legged TorchScript expected act_dim={K1_LEGGED_GYM_NUM_ACT}, "
+                            f"got {probe.shape} from {path}"
+                        )
+                    self._ts_policy = ts
+                    self._policy_is_torchscript = True
+                    self._policy_is_onnx = False
+                    self.policy = None
+                    self._policy_obs_dim = K1_LEGGED_GYM_NUM_OBS
+                    self._policy_action_dim = K1_LEGGED_GYM_NUM_ACT
+                    print(
+                        f"[MultiRobotMotrixSim] K1 legged_gym TorchScript: {path} "
+                        f"(obs_dim={self._policy_obs_dim}, act_dim={self._policy_action_dim})"
+                    )
+                    return
+
+                self.policy = self._load_torch_policy(path)
+                if self._policy_obs_dim != K1_LEGGED_GYM_NUM_OBS or self._policy_action_dim != K1_LEGGED_GYM_NUM_ACT:
+                    raise RuntimeError(
+                        f"K1 legged_gym expects obs_dim={K1_LEGGED_GYM_NUM_OBS} act_dim={K1_LEGGED_GYM_NUM_ACT}, "
+                        f"got {self._policy_obs_dim} x {self._policy_action_dim} from {path}"
+                    )
+                self._policy_is_onnx = False
+                self._policy_is_torchscript = False
+                print(
+                    f"[MultiRobotMotrixSim] K1 legged_gym Torch actor: {path} "
+                    f"(obs_dim={self._policy_obs_dim}, act_dim={self._policy_action_dim})"
+                )
+                return
+
+            raise RuntimeError(f"K1 legged_gym policy must be .onnx or .pt, got {path}")
+
+        self.policy = self._load_torch_policy(path)
+
+    def _load_mlp_actor_from_checkpoint(self, policy_path: Path) -> tuple[nn.Module, int, int]:
         ckpt = _load_checkpoint_compat(policy_path, map_location=self.policy_device)
         state_dict = ckpt["model_state_dict"] if isinstance(ckpt, dict) and "model_state_dict" in ckpt else ckpt
         if not isinstance(state_dict, dict):
@@ -1614,20 +1740,121 @@ class MultiRobotMotrixSim:
                 actor_layer_dims.append(in_dim)
             actor_layer_dims.append(out_dim)
 
-        self._policy_obs_dim = int(actor_layer_dims[0])
-        self._policy_action_dim = int(actor_layer_dims[-1])
+        in_dim = int(actor_layer_dims[0])
+        out_dim = int(actor_layer_dims[-1])
         policy = MLPActor(layer_dims=actor_layer_dims).to(self.policy_device)
         policy.load_state_dict(actor_state, strict=True)
         policy.eval()
+        return policy, in_dim, out_dim
+
+    def _load_torch_policy(self, policy_path: Path) -> nn.Module:
+        policy, in_d, out_d = self._load_mlp_actor_from_checkpoint(policy_path)
+        self._policy_obs_dim = in_d
+        self._policy_action_dim = out_d
         return policy
+
+    def _init_k1_stand_policy(self, policy_path: Path) -> None:
+        path = Path(policy_path)
+        if not path.is_file():
+            raise FileNotFoundError(f"K1 stand policy not found: {path}")
+        policy, in_d, out_d = self._load_mlp_actor_from_checkpoint(path)
+        if in_d != K1_FULL_BODY_NUM_OBS or out_d != K1_FULL_BODY_NUM_ACT:
+            raise RuntimeError(
+                f"K1 stand policy expects obs dim {K1_FULL_BODY_NUM_OBS} and act dim {K1_FULL_BODY_NUM_ACT}, "
+                f"got {in_d} x {out_d} from {path}"
+            )
+        traced = None
+        try:
+            policy.eval()
+            with torch.inference_mode():
+                example = torch.zeros((1, in_d), device=self.policy_device, dtype=torch.float32)
+                traced = torch.jit.trace(policy, example)
+            traced.eval()
+        except Exception as e:
+            print(
+                f"[MultiRobotMotrixSim] K1 stand policy TorchScript trace failed ({type(e).__name__}: {e}); "
+                "using eager nn.Module (often slower than legged TorchScript)."
+            )
+        self._k1_stand_policy = traced if traced is not None else policy
+        mode = "TorchScript traced" if traced is not None else "eager MLP"
+        print(f"[MultiRobotMotrixSim] K1 hybrid stand (full-body) policy: {path} ({in_d}->{out_d}, {mode})")
+
+    def _infer_policy_actions(self, obs_batch: np.ndarray) -> np.ndarray:
+        if self._policy_is_onnx:
+            ob = obs_batch.astype(np.float32, copy=False)
+            return np.asarray(
+                self._onnx_session.run([self._onnx_output_name], {self._onnx_input_name: ob})[0],
+                dtype=np.float32,
+            )
+        if self._policy_is_torchscript:
+            if self._ts_policy is None:
+                raise RuntimeError("TorchScript policy not loaded")
+            with torch.inference_mode():
+                obs_tensor = torch.from_numpy(obs_batch.astype(np.float32, copy=False)).to(self.policy_device)
+                return self._ts_policy(obs_tensor).detach().cpu().numpy().astype(np.float32, copy=False)
+        if self.policy is None:
+            raise RuntimeError("Torch policy not loaded")
+        with torch.inference_mode():
+            obs_tensor = torch.from_numpy(obs_batch).to(self.policy_device)
+            return self.policy(obs_tensor).detach().cpu().numpy().astype(np.float32, copy=False)
+
+    def _infer_k1_stand_actions(self, obs_batch: np.ndarray) -> np.ndarray:
+        if self._k1_stand_policy is None:
+            raise RuntimeError("K1 stand policy not loaded")
+        with torch.inference_mode():
+            obs_tensor = torch.from_numpy(obs_batch.astype(np.float32, copy=False)).to(self.policy_device)
+            return self._k1_stand_policy(obs_tensor).detach().cpu().numpy().astype(np.float32, copy=False)
+
+    def _k1_update_hybrid_walk_state(self, spec: RobotSpec, cmd: np.ndarray) -> None:
+        vxy = float(np.hypot(float(cmd[0]), float(cmd[1])))
+        wz = abs(float(cmd[2]))
+        prev = spec.k1_hybrid_walking
+        if prev:
+            if vxy < K1_HYBRID_WALK_EXIT_LIN and wz < K1_HYBRID_WALK_EXIT_YAW:
+                spec.k1_hybrid_walking = False
+        else:
+            if vxy >= K1_HYBRID_WALK_ENTER_LIN or wz >= K1_HYBRID_WALK_ENTER_YAW:
+                spec.k1_hybrid_walking = True
+        if prev != spec.k1_hybrid_walking:
+            spec.last_action[:] = 0.0
+            if spec.k1_legged_last_action is not None:
+                spec.k1_legged_last_action[:] = 0.0
+
+    def _obs_k1_fullbody_for_hybrid(self, spec: RobotSpec, cmd_override: np.ndarray | None = None) -> np.ndarray:
+        obs_scale = self.robot_cfg.obs_scale
+        qpos = self.data.dof_pos[0]
+        qvel = self.data.dof_vel[0]
+        base_lin_world = qvel[spec.base_qvel_adr : spec.base_qvel_adr + 3]
+        base_ang_world = qvel[spec.base_qvel_adr + 3 : spec.base_qvel_adr + 6]
+        quat = qpos[spec.base_qpos_adr + 3 : spec.base_qpos_adr + 7]
+        rot_wb = _quat_to_rot_world_from_body(quat)
+        base_lin = (rot_wb.T @ base_lin_world).astype(np.float32) * obs_scale["base_lin_vel"]
+        base_ang = (rot_wb.T @ base_ang_world).astype(np.float32) * obs_scale["base_ang_vel"]
+        gravity = (rot_wb.T @ np.array([0.0, 0.0, -1.0], dtype=np.float32)) * obs_scale["gravity_orientation"]
+        cmd_src = self.command_buffer[spec.rid] if cmd_override is None else cmd_override
+        cmd = cmd_src * obs_scale["cmd"]
+        joint_pos = (qpos[spec.qpos_idx] - spec.init_joint_pos).astype(np.float32) * obs_scale["joint_pos"]
+        joint_vel = qvel[spec.qvel_idx].astype(np.float32) * obs_scale["joint_vel"]
+        last_action = spec.last_action * obs_scale["last_action"]
+        obs_step = np.concatenate([base_lin, base_ang, gravity, cmd, joint_pos, joint_vel, last_action], axis=-1).astype(
+            np.float32
+        )
+        obs_step = np.nan_to_num(obs_step, nan=0.0, posinf=0.0, neginf=0.0)
+        c = float(self.robot_cfg.obs_clip)
+        return np.clip(obs_step, -c, c)
 
     def _build_robot_specs(self) -> dict[int, RobotSpec]:
         specs: dict[int, RobotSpec] = {}
         joint_names = self.robot_cfg.policy_joint_names
         action_scale = build_action_scale_array(joint_names, self.robot_cfg.action_scale_cfg)
-        obs_step_dim = (9 if self.robot_cfg.include_base_lin_vel_obs else 6) + 3 + 3 * len(joint_names)
-        obs_history_len = max(1, int(self.robot_cfg.obs_history_length))
-        obs_dim = obs_step_dim * obs_history_len
+        if self.robot_cfg.use_k1_legged_gym_policy:
+            obs_step_dim = K1_LEGGED_GYM_NUM_OBS
+            obs_history_len = max(1, int(self.robot_cfg.obs_history_length))
+            obs_dim = obs_step_dim * obs_history_len
+        else:
+            obs_step_dim = (9 if self.robot_cfg.include_base_lin_vel_obs else 6) + 3 + 3 * len(joint_names)
+            obs_history_len = max(1, int(self.robot_cfg.obs_history_length))
+            obs_dim = obs_step_dim * obs_history_len
 
         for rid in self.active_robot_ids:
             name = FIXED_ROBOT_ID_TO_NAME[rid]
@@ -1725,6 +1952,28 @@ class MultiRobotMotrixSim:
                 kd = parse_param_for_joint_names(pref_joints, self.robot_cfg.motor_damping)
             effort = parse_param_for_joint_names(pref_joints, self.robot_cfg.motor_effort_limit)
 
+            k1_legged_last_action = None
+            k1_legged_default_dof = None
+            k1_legged_joint_indices = None
+            k1_non_leg_mask = None
+            k1_gait_phase = None
+            if self.robot_cfg.use_k1_legged_gym_policy:
+                leg_idx_list = [joint_names.index(jn) for jn in K1_LEGGED_GYM_LEG_JOINTS_POLICY_ORDER]
+                k1_legged_joint_indices = np.asarray(leg_idx_list, dtype=np.int32)
+                k1_non_leg_mask = np.ones((len(joint_names),), dtype=bool)
+                k1_non_leg_mask[k1_legged_joint_indices] = False
+                k1_legged_default_dof = np.zeros(K1_LEGGED_GYM_NUM_ACT, dtype=np.float32)
+                for i, jn in enumerate(K1_LEGGED_GYM_LEG_JOINTS_POLICY_ORDER):
+                    k1_legged_default_dof[i] = float(
+                        K1_LEGGED_GYM_DEFAULT_JOINT_ANGLES.get(jn, K1_LEGGED_GYM_DEFAULT_JOINT_ANGLES["default"])
+                    )
+                k1_legged_last_action = np.zeros(K1_LEGGED_GYM_NUM_ACT, dtype=np.float32)
+                k1_gait_phase = 0.0
+                for i, jn in enumerate(K1_LEGGED_GYM_LEG_JOINTS_POLICY_ORDER):
+                    li = int(leg_idx_list[i])
+                    kp[li] = float(K1_LEGGED_GYM_KP[jn])
+                    kd[li] = float(K1_LEGGED_GYM_KD[jn])
+                    effort[li] = float(K1_LEGGED_GYM_TORQUE_LIMIT)
             specs[rid] = RobotSpec(
                 rid=rid,
                 name=name,
@@ -1759,6 +2008,11 @@ class MultiRobotMotrixSim:
                 joint_upper=np.asarray(joint_upper, dtype=np.float32),
                 pi_joint_lower_mujoco=pi_joint_lower_mujoco,
                 pi_joint_upper_mujoco=pi_joint_upper_mujoco,
+                k1_legged_last_action=k1_legged_last_action,
+                k1_legged_default_dof=k1_legged_default_dof,
+                k1_legged_joint_indices=k1_legged_joint_indices,
+                k1_non_leg_mask=k1_non_leg_mask,
+                k1_gait_phase=k1_gait_phase,
             )
         return specs
 
@@ -1779,6 +2033,9 @@ class MultiRobotMotrixSim:
             vx = float(np.clip(vx, -float(vx_lim), float(vx_lim)))
             vy = float(np.clip(vy, -float(vy_lim), float(vy_lim)))
             w = float(np.clip(w, -float(w_lim), float(w_lim)))
+        vx = float(np.clip(vx, CMD_VEL_NORM_MIN, CMD_VEL_NORM_MAX))
+        vy = float(np.clip(vy, CMD_VEL_NORM_MIN, CMD_VEL_NORM_MAX))
+        w = float(np.clip(w, CMD_VEL_NORM_MIN, CMD_VEL_NORM_MAX))
         ts = float(timestamp) if timestamp else time.time()
         if ts < self.command_ts[robot_id]:
             return
@@ -1793,7 +2050,80 @@ class MultiRobotMotrixSim:
         _ = robot_id
         return True
 
+    def _k1_legged_cmd_obs_from_norm_cmd(self, cmd: np.ndarray) -> np.ndarray:
+        """T1_env obs[6:9] is raw command × scale (~m/s, rad/s), not [0,1]. Zeros must stay 0.
+
+        Do **not** use (u+1)/2: that maps a single-axis command to biased values on the other axes
+        (e.g. [0,0,ω] → [0.5,0.5,…]) and breaks axis decoupling in the policy.
+        """
+        return np.clip(np.asarray(cmd, dtype=np.float32).reshape(3), CMD_VEL_NORM_MIN, CMD_VEL_NORM_MAX)
+
+    def _obs_k1_legged_gym(self, spec: RobotSpec, cmd_override: np.ndarray | None = None) -> np.ndarray:
+        """Observation matching legged_gym/envs/T1/T1.py compute_obs (47-dim K1 locomotion)."""
+        if (
+            spec.k1_legged_default_dof is None
+            or spec.k1_legged_joint_indices is None
+            or spec.k1_legged_last_action is None
+            or spec.k1_gait_phase is None
+        ):
+            raise RuntimeError("K1 legged_gym buffers are not initialized on RobotSpec")
+        qpos = self.data.dof_pos[0]
+        qvel = self.data.dof_vel[0]
+        quat = qpos[spec.base_qpos_adr + 3 : spec.base_qpos_adr + 7]
+        rot_wb = _quat_to_rot_world_from_body(quat)
+        gravity = (rot_wb.T @ np.array([0.0, 0.0, -1.0], dtype=np.float32)) * float(K1_LEGGED_GYM_GRAVITY_SCALE)
+
+        # Prefer MJCF gyro on imu (matches legged_gym `get_sensor_value("gyro", ...)` on their scene).
+        # Soccer K1 asset names the gyro `angular-velocity`; training scene may use `gyro`.
+        gyro = None
+        for sname in (f"{spec.name}__angular-velocity", f"{spec.name}__gyro"):
+            try:
+                raw = np.asarray(self.model.get_sensor_value(sname, self.data), dtype=np.float32).reshape(-1)
+                if raw.size >= 3:
+                    gyro = raw[:3].copy()
+                    break
+            except BaseException:
+                continue
+        if gyro is None:
+            base_ang_world = qvel[spec.base_qvel_adr + 3 : spec.base_qvel_adr + 6]
+            gyro = (rot_wb.T @ base_ang_world.astype(np.float32)).astype(np.float32)
+        gyro_scaled = gyro.astype(np.float32) * float(K1_LEGGED_GYM_GYRO_SCALE_LIN_VEL)
+
+        cmd_src = self.command_buffer[spec.rid] if cmd_override is None else cmd_override
+        command_scale = np.asarray([1.0, 1.0, 1.0], dtype=np.float32)
+        cmd_scaled = self._k1_legged_cmd_obs_from_norm_cmd(cmd_src) * command_scale
+
+        gait = float(spec.k1_gait_phase)
+        gf = float(K1_LEGGED_GYM_GAIT_FREQUENCY)
+        gait_mask = 1.0 if gf > 1.0e-8 else 0.0
+        c_g = float(np.cos(2 * np.pi * gait) * gait_mask)
+        s_g = float(np.sin(2 * np.pi * gait) * gait_mask)
+
+        q_j = qpos[spec.qpos_idx].astype(np.float32)
+        dq_j = qvel[spec.qvel_idx].astype(np.float32)
+        leg_i = spec.k1_legged_joint_indices
+        dof_pos_leg = q_j[leg_i]
+        dof_vel_leg = dq_j[leg_i]
+        diff = (dof_pos_leg - spec.k1_legged_default_dof) * float(K1_LEGGED_GYM_DOF_POS_SCALE)
+        dvel = dof_vel_leg * float(K1_LEGGED_GYM_DOF_VEL_SCALE)
+        last_a = spec.k1_legged_last_action.astype(np.float32)
+
+        obs = np.zeros((K1_LEGGED_GYM_NUM_OBS,), dtype=np.float32)
+        obs[0:3] = gravity
+        obs[3:6] = gyro_scaled
+        obs[6:9] = cmd_scaled
+        obs[9] = c_g
+        obs[10] = s_g
+        obs[11:23] = diff
+        obs[23:35] = dvel
+        obs[35:47] = last_a
+        obs = np.nan_to_num(obs, nan=0.0, posinf=0.0, neginf=0.0)
+        c = float(self.robot_cfg.obs_clip)
+        return np.clip(obs, -c, c)
+
     def _obs_for_robot(self, spec: RobotSpec, cmd_override: np.ndarray | None = None) -> np.ndarray:
+        if self.robot_cfg.use_k1_legged_gym_policy:
+            return self._obs_k1_legged_gym(spec, cmd_override=cmd_override)
         obs_scale = self.robot_cfg.obs_scale
         qpos = self.data.dof_pos[0]
         qvel = self.data.dof_vel[0]
@@ -1878,12 +2208,16 @@ class MultiRobotMotrixSim:
         debug_obs = None
         debug_act = None
         infer_specs: list[RobotSpec] = []
-        infer_obs: list[np.ndarray] = []
+        infer_cmd_override: list[np.ndarray | None] = []
         default_cmd = np.asarray(DEFAULT_CMD, dtype=np.float32)
+        hybrid = self._k1_stand_policy is not None
 
         for spec in self.robot_specs.values():
             if self._is_robot_protected(spec.rid):
                 spec.last_action[:] = 0.0
+                if spec.k1_legged_last_action is not None:
+                    spec.k1_legged_last_action[:] = 0.0
+                spec.k1_hybrid_walking = False
                 spec.filtered_dof_target[:] = spec.init_angles
                 spec.target_joint_pos[:] = spec.init_angles
                 if spec.pi_default_dof_pos is not None and spec.pi_filtered_dof_target is not None and spec.pi_target_dof_pos is not None:
@@ -1892,29 +2226,111 @@ class MultiRobotMotrixSim:
                 continue
 
             zero_left = self._robot_cmd_zero_frames_left.get(spec.rid, 0)
+            cmd_ov = default_cmd if zero_left > 0 else None
             if zero_left > 0:
-                obs = self._obs_for_robot(spec, cmd_override=default_cmd)
                 self._robot_cmd_zero_frames_left[spec.rid] = zero_left - 1
-            else:
-                obs = self._obs_for_robot(spec)
-
             infer_specs.append(spec)
-            infer_obs.append(obs)
+            infer_cmd_override.append(cmd_ov)
 
+        walk_obs: list[np.ndarray] = []
+        stand_obs: list[np.ndarray] = []
+        debug_obs_list: list[np.ndarray] = []
+
+        if len(infer_specs) != len(infer_cmd_override):
+            raise RuntimeError("internal: infer_specs / infer_cmd_override length mismatch")
+        for spec, cmd_ov in zip(infer_specs, infer_cmd_override):
+            cmd_gate = default_cmd if cmd_ov is not None else self.command_buffer[spec.rid]
+            if hybrid:
+                self._k1_update_hybrid_walk_state(
+                    spec, np.clip(np.asarray(cmd_gate, dtype=np.float32), CMD_VEL_NORM_MIN, CMD_VEL_NORM_MAX)
+                )
+                if spec.k1_hybrid_walking:
+                    o = self._obs_k1_legged_gym(spec, cmd_override=cmd_ov)
+                    walk_obs.append(o)
+                else:
+                    o = self._obs_k1_fullbody_for_hybrid(spec, cmd_override=cmd_ov)
+                    stand_obs.append(o)
+            elif self.robot_cfg.use_k1_legged_gym_policy:
+                o = self._obs_k1_legged_gym(spec, cmd_override=cmd_ov)
+                walk_obs.append(o)
+            else:
+                o = self._obs_for_robot(spec, cmd_override=cmd_ov)
+                walk_obs.append(o)
+            debug_obs_list.append(o)
+
+        act_walk_batch: np.ndarray | None = None
+        if walk_obs:
+            obs_batch_w = np.stack(walk_obs, axis=0).astype(np.float32, copy=False)
+            act_walk_batch = self._infer_policy_actions(obs_batch_w)
+            if act_walk_batch.ndim == 1:
+                act_walk_batch = act_walk_batch.reshape(1, -1)
+
+        act_stand_batch: np.ndarray | None = None
+        if stand_obs:
+            obs_batch_s = np.stack(stand_obs, axis=0).astype(np.float32, copy=False)
+            act_stand_batch = self._infer_k1_stand_actions(obs_batch_s)
+            if act_stand_batch.ndim == 1:
+                act_stand_batch = act_stand_batch.reshape(1, -1)
+
+        wi = 0
+        si = 0
         if infer_specs:
-            obs_batch = np.stack(infer_obs, axis=0).astype(np.float32, copy=False)
-            with torch.inference_mode():
-                obs_tensor = torch.from_numpy(obs_batch).to(self.policy_device)
-                act_batch = self.policy(obs_tensor).detach().cpu().numpy().astype(np.float32, copy=False)
-            if act_batch.ndim == 1:
-                act_batch = act_batch.reshape(1, -1)
-
             for i, spec in enumerate(infer_specs):
-                act = np.nan_to_num(act_batch[i], nan=0.0, posinf=0.0, neginf=0.0)
+                hybrid_stand = bool(hybrid and not spec.k1_hybrid_walking)
+                if hybrid_stand:
+                    if act_stand_batch is None:
+                        raise RuntimeError("K1 hybrid stand policy produced no actions")
+                    act = np.nan_to_num(act_stand_batch[si], nan=0.0, posinf=0.0, neginf=0.0)
+                    si += 1
+                else:
+                    if act_walk_batch is None:
+                        raise RuntimeError("K1 walk policy produced no actions")
+                    act = np.nan_to_num(act_walk_batch[wi], nan=0.0, posinf=0.0, neginf=0.0)
+                    wi += 1
                 if spec.rid == debug_rid:
-                    debug_obs = infer_obs[i].copy()
+                    debug_obs = debug_obs_list[i].copy()
                     debug_act = act.copy()
-                if (
+                if self.robot_cfg.use_k1_legged_gym_policy:
+                    if hybrid_stand:
+                        spec.last_action[:] = act
+                        act_scaled = np.clip(act * spec.action_scale, ACTION_CLIP[0], ACTION_CLIP[1])
+                        joint_pos_action = spec.init_angles + act_scaled
+                        if ACTION_SMOOTH_FILTER:
+                            spec.filtered_dof_target[:] = spec.filtered_dof_target * 0.2 + joint_pos_action * 0.8
+                        else:
+                            spec.filtered_dof_target[:] = joint_pos_action
+                        if spec.joint_lower is not None and spec.joint_upper is not None:
+                            np.clip(
+                                spec.filtered_dof_target,
+                                spec.joint_lower,
+                                spec.joint_upper,
+                                out=spec.filtered_dof_target,
+                            )
+                        spec.target_joint_pos[:] = spec.filtered_dof_target
+                        continue
+                    if (
+                        spec.k1_legged_joint_indices is None
+                        or spec.k1_legged_default_dof is None
+                        or spec.k1_legged_last_action is None
+                    ):
+                        continue
+                    act = act.astype(np.float32, copy=False)
+                    spec.k1_legged_last_action[:] = act
+                    spec.last_action[:] = 0.0
+                    for kk in range(K1_LEGGED_GYM_NUM_ACT):
+                        jidx = int(spec.k1_legged_joint_indices[kk])
+                        spec.last_action[jidx] = act[kk]
+                    spec.target_joint_pos[:] = spec.init_angles
+                    asc = float(K1_LEGGED_GYM_ACTION_SCALE)
+                    for kk in range(K1_LEGGED_GYM_NUM_ACT):
+                        jidx = int(spec.k1_legged_joint_indices[kk])
+                        spec.target_joint_pos[jidx] = float(spec.k1_legged_default_dof[kk] + act[kk] * asc)
+                    if spec.joint_lower is not None and spec.joint_upper is not None:
+                        np.clip(spec.target_joint_pos, spec.joint_lower, spec.joint_upper, out=spec.target_joint_pos)
+                    if spec.k1_non_leg_mask is not None:
+                        spec.target_joint_pos[spec.k1_non_leg_mask] = spec.init_joint_pos[spec.k1_non_leg_mask]
+                    spec.filtered_dof_target[:] = spec.target_joint_pos
+                elif (
                     self.robot_cfg.robot_type == PI_PLUS_ROBOT_TYPE
                     and spec.pi_default_dof_pos is not None
                     and spec.pi_isaac_to_mujoco_idx is not None
@@ -2052,6 +2468,14 @@ class MultiRobotMotrixSim:
             # Keep process alive and preserve current state/teleport commands.
             # Full reset here makes interactive controls appear ineffective.
             return counter + 1
+        if self.robot_cfg.use_k1_legged_gym_policy:
+            dt_g = float(self.sim_dt) * float(K1_LEGGED_GYM_GAIT_FREQUENCY)
+            for sp in self.robot_specs.values():
+                if sp.k1_gait_phase is None:
+                    continue
+                if self._k1_stand_policy is not None and not sp.k1_hybrid_walking:
+                    continue
+                sp.k1_gait_phase = float(np.fmod(sp.k1_gait_phase + dt_g, 1.0))
         if self._enforce_joint_state_limits():
             self.model.forward_kinematic(self.data)
         self._update_referee(self.sim_dt)
@@ -2261,6 +2685,11 @@ class MultiRobotMotrixSim:
         if spec.pi_act_idx_mujoco is not None:
             self._set_actuator_ctrls(spec.pi_act_idx_mujoco, self._startup_ctrl[spec.pi_act_idx_mujoco])
         spec.last_action[:] = 0.0
+        if spec.k1_legged_last_action is not None:
+            spec.k1_legged_last_action[:] = 0.0
+        if spec.k1_gait_phase is not None:
+            spec.k1_gait_phase = 0.0
+        spec.k1_hybrid_walking = False
         spec.filtered_dof_target[:] = spec.init_angles
         spec.target_joint_pos[:] = spec.init_angles
         if spec.pi_default_dof_pos is not None and spec.pi_filtered_dof_target is not None and spec.pi_target_dof_pos is not None:
@@ -2345,6 +2774,11 @@ class MultiRobotMotrixSim:
         self._restore_ball_state(ball_state)
         for spec in self.robot_specs.values():
             spec.last_action[:] = 0.0
+            if spec.k1_legged_last_action is not None:
+                spec.k1_legged_last_action[:] = 0.0
+            if spec.k1_gait_phase is not None:
+                spec.k1_gait_phase = 0.0
+            spec.k1_hybrid_walking = False
             spec.filtered_dof_target[:] = spec.init_angles
             spec.target_joint_pos[:] = spec.init_angles
             if spec.pi_default_dof_pos is not None and spec.pi_filtered_dof_target is not None and spec.pi_target_dof_pos is not None:

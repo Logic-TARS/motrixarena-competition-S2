@@ -150,6 +150,13 @@ go_back_to_field:
   good_yaw_threshold_degree: 10
   walk_vel_x: 0.5
   walk_vel_theta: 1
+  # 角速度指令额外系数（仍受 decider / 仿真 [-1,1] 限制）；原地转太慢时可略 >1 以顶满角速度指令
+  yaw_cmd_boost_coarse: 1.0
+  yaw_cmd_boost_fine: 1.0
+  # 粗/细转向时前进分量比例 walk_vel_x * scale（0=纯转向；实体 / 仿真转向慢时可试 0.2~0.35）
+  arc_forward_scale: 0.0
+  # 末段对准成功后 sleep；仿真建议 0 以免阻塞控制循环
+  adjust_yaw_settle_s: 0.0
   arrive_trust_time: 20
   obstacle_avoidance: true
 chase:

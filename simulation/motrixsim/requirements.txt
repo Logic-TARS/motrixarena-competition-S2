@@ -8,3 +8,4 @@ flask-socketio
 pillow
 fastapi
 uvicorn
+onnxruntime>=1.16

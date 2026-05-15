@@ -83,6 +83,9 @@ class Agent(Node):
             vel_theta += self._config.get("min_walk_vel_theta", 0.3)
         elif vel_theta < -0.001:
             vel_theta -= self._config.get("min_walk_vel_thetea", 0.3)
+        vel_x = float(np.clip(vel_x, -1.0, 1.0))
+        vel_y = float(np.clip(vel_y, -1.0, 1.0))
+        vel_theta = float(np.clip(vel_theta, -1.0, 1.0))
         self._action.cmd_vel(vel_x, vel_y, vel_theta)
 
 
@@ -412,10 +415,9 @@ class SimAgent:
         vel_x *= self._config.get("max_walk_vel_x", 0.25)
         vel_y *= self._config.get("max_walk_vel_y", 0.1)
         vel_theta *= self._config.get("max_walk_vel_theta", 0.5)
-        # ... (Clipping logic omitted for brevity, user can copy if needed, or we refactor logic to utils)
-        # Ideally we reuse the clipping logic. 
-        # For compatibility, let's just copy the logic or call _action.cmd_vel
-        
+        vel_x = float(np.clip(vel_x, -1.0, 1.0))
+        vel_y = float(np.clip(vel_y, -1.0, 1.0))
+        vel_theta = float(np.clip(vel_theta, -1.0, 1.0))
         # We delegate to _action which handles Sim check
         self._action.cmd_vel(vel_x, vel_y, vel_theta)
 
