@@ -254,6 +254,7 @@ class _MotrixHeadlessRenderer:
         self._last_task = None
         self._last_rgb: np.ndarray | None = None
         self._capture_done_warned = False
+        self._pending_data = None
 
     def set_capture_camera(self, camera_name: str | None) -> None:
         if not camera_name:
@@ -271,21 +272,40 @@ class _MotrixHeadlessRenderer:
         self._cam = cam
 
     def update_scene(self, data, camera=None, scene_option=None):
-        self._app.sync(data, wait=False)
-        if self._capture_disabled or self._cam is None:
-            self._last_task = None
-            return
-        self._last_task = self._cam.capture()
+        # All RenderApp.sync happens in render() so we do not sync here and again in render().
+        self._pending_data = data
+        self._last_task = None
 
     def render(self) -> np.ndarray:
+        data = self._pending_data
+        if self._capture_disabled or self._cam is None:
+            self._last_task = None
+            try:
+                self._app.sync(data, wait=False)
+            except Exception:
+                pass
+            if self._last_rgb is not None:
+                return self._last_rgb
+            return np.zeros((self._h, self._w, 3), dtype=np.uint8)
+
+        # Async capture: push state, enqueue capture, then one wait sync (see RenderApp.sync docs).
+        # Do not call sync inside the take_image retry loop.
+        try:
+            self._app.sync(data, wait=False)
+        except Exception:
+            pass
+        try:
+            self._last_task = self._cam.capture()
+        except Exception:
+            self._last_task = None
+
         task = self._last_task
         if task is None:
             if self._last_rgb is not None:
                 return self._last_rgb
             return np.zeros((self._h, self._w, 3), dtype=np.uint8)
+
         img = None
-        # Drive renderer once more so async capture task can complete.
-        # In some Motrix builds, polling task.state alone may stay pending.
         try:
             self._app.sync(None, wait=True)
         except Exception:
@@ -296,10 +316,6 @@ class _MotrixHeadlessRenderer:
             except Exception:
                 img = None
             if img is not None or _motrix_capture_task_closed(task):
-                break
-            try:
-                self._app.sync(None, wait=True)
-            except Exception:
                 break
         if img is None and not self._capture_done_warned:
             st = getattr(task, "state", None)
