@@ -13,27 +13,7 @@
 # limitations under the License.
 # ==============================================================================
 
-from . import (
-    acrobot,  # noqa: F401
-    anymal_navigation,  # noqa: F401
-    bounce_ball,  # noqa: F401
-    cartpole,  # noqa: F401
-    dm_cheetah,  # noqa: F401
-    dm_finger,  # noqa: F401
-    dm_hopper,  # noqa: F401
-    dm_humanoid,  # noqa: F401
-    dm_lqr,  # noqa: F401
-    dm_manipulator,  # noqa: F401
-    dm_quadruped,  # noqa: F401
-    dm_reacher,  # noqa: F401
-    dm_walker,  # noqa: F401
-    franka_lift_cube,  # noqa: F401
-    franka_open_cabinet,  # noqa: F401
-    go1,  # noqa: F401
-    go2,  # noqa: F401
-    k1,  # noqa: F401
-    pendulum,  # noqa: F401
-    point_mass,  # noqa: F401
-    rm65_open_cabinet,  # noqa: F401
-    shadow_hand_repose,  # noqa: F401
-)
+from . import walk_np  # noqa: F401 register envs
+from .cfg import K1WalkNpEnvCfg  # noqa: F401
+
+__all__ = ["K1WalkNpEnvCfg"]

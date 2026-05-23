@@ -1,0 +1,8 @@
+<mujoco model="K1-train-scene">
+  <include file="K1_locomotion.xml"/>
+
+  <sensor>
+    <velocimeter site="imu" name="local_linvel"/>
+    <gyro name="gyro" site="imu" noise="0.005"/>
+  </sensor>
+</mujoco>
