@@ -5,7 +5,14 @@
 mkdir -p logs
 
 # Activate k1 conda environment
-source ~/anaconda3/etc/profile.d/conda.sh
+if [[ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]]; then
+    source "$HOME/miniconda3/etc/profile.d/conda.sh"
+elif [[ -f "$HOME/anaconda3/etc/profile.d/conda.sh" ]]; then
+    source "$HOME/anaconda3/etc/profile.d/conda.sh"
+else
+    echo "Cannot find conda.sh under ~/miniconda3 or ~/anaconda3"
+    exit 1
+fi
 conda activate k1
 
 # Paths
@@ -25,6 +32,8 @@ cleanup() {
 # Parse Arguments
 RED_OVERRIDE=""
 BLUE_OVERRIDE=""
+SIM_IP="127.0.0.1"
+SIM_PORT="5555"
 
 while [[ "$#" -gt 0 ]]; do
     case $1 in
@@ -42,6 +51,14 @@ while [[ "$#" -gt 0 ]]; do
             ;;
         --blue)
             BLUE_OVERRIDE="$2"
+            shift
+            ;;
+        --ip)
+            SIM_IP="$2"
+            shift
+            ;;
+        --port)
+            SIM_PORT="$2"
             shift
             ;;
         *)
@@ -95,19 +112,20 @@ fi
 
 echo "Launching Red Team: $RED_COUNT robots"
 echo "Launching Blue Team: $BLUE_COUNT robots"
+echo "Simulation endpoint: $SIM_IP:$SIM_PORT"
 
 # Launch Red Team
 for ((i=0; i<RED_COUNT; i++)); do
     SESSION_NAME="decider_red_$i"
     echo "Starting $SESSION_NAME..."
-    screen -dmS "$SESSION_NAME" bash -c "python3 $DECIDER_SCRIPT --simulation --color red --id $i; exec bash"
+    screen -dmS "$SESSION_NAME" bash -c "python3 $DECIDER_SCRIPT --simulation --ip $SIM_IP --port $SIM_PORT --color red --id $i; exec bash"
 done
 
 # Launch Blue Team
 for ((i=0; i<BLUE_COUNT; i++)); do
     SESSION_NAME="decider_blue_$i"
     echo "Starting $SESSION_NAME..."
-    screen -dmS "$SESSION_NAME" bash -c "python3 $DECIDER_SCRIPT --simulation --color blue --id $i; exec bash"
+    screen -dmS "$SESSION_NAME" bash -c "python3 $DECIDER_SCRIPT --simulation --ip $SIM_IP --port $SIM_PORT --color blue --id $i; exec bash"
 done
 
 echo "All agents launched in screen sessions."

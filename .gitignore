@@ -12,6 +12,7 @@ __pycache__/
 logs/
 debug_logs/
 *.log
+legged_gym/sim_soccer2/
 
 # 虚拟环境与依赖
 envs/

@@ -1,0 +1,202 @@
+Motphys 仿真3v3足球赛 训练平台使用指南
+Motphys 2026年5月20日 14:13
+Motphys 仿真
+3v3足球赛
+训练平台使用指南
+本指南为您提供启动和管理仿真环境的标准化流程，包含可视化界面管理与命令行快捷操作方式。
+01
+创建地瓜云镜像
+1. 加入群组
+进入个人中心，点击加入群组，输入邀请码
+RUO1VKPCRUO1VKPC
+，即可加入“MotrixArenaS2仿真足球赛”群组。
+最新的邀请链接：
+https://robogo.d-robotics.cc/group/detail/01KRTSAEMYT3P65JWRJRW875HE?invite=RUO1VKPC
+2. 找到镜像
+进入镜像资产-群组镜像，点击“MotrixArenaS2仿真足球赛”群组，即可看到simsoccer镜像
+3. 创建镜像
+点击镜像后，右上角点击快速创建
+4. 打开镜像
+填写名称，选择显卡配置，其他配置保持默认即可。
+02
+启动云环境与仿真管理器
+1. 进入云桌面
+打开地瓜云镜像桌面。
+系统开机后，点击“打开桌面”，通过网页远程连接服务器 。
+可以使用无影云电脑进行远程连接（推荐）。选择“D-Robotics”组织后，点击蓝色的下一步按钮。
+接下来填写账号和密码。
+账号和密码在如下位置
+登录成功
+2. 安装Conda
+mkdir
+-p ~/miniconda3
+wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/miniconda3/miniconda.sh
+bash ~/miniconda3/miniconda.sh -b -u -p ~/miniconda3
+rm
+-rf ~/miniconda3/miniconda.sh
+~/miniconda3/bin/conda init bash
+source
+~/.bashrc
+3. 创建仿真环境“motrixsim0508”
+cd
+/opt/sim_soccer2/simulation/motrixsim
+conda create -n motrixsim0508 python=3.12 -y
+conda activate motrixsim0508
+pip install -r requirements.txt
+4. 创建决策环境“k1”
+cd
+/opt/sim_soccer2
+conda create -n k1 python=3.8 -y
+conda activate k1
+pip install -r decider/requirements.txt
+5. 启动 Sim Manager 服务
+在
+sim_soccer2
+根目录下启动 Sim Manager 服务。
+打开命令行终端，运行以下命令（运行后请勿关闭该命令行窗口）：
+cd
+/opt/sim_soccer2
+conda activate motrixsim0508
+python simulation/motrixsim/sim_manager.py --host 0.0.0.0 --port 8000
+6. 访问 Sim Manager
+打开浏览器（可使用桌面自带的火狐浏览器），
+访问地址
+http://127.0.0.1:8000/
+。
+03
+网页端操作流程(Sim Manager)
+在打开的 Sim Manager 网页上，您可以进行以下可视化操作：
+1. 启动仿真实例
+•
+在
+Start Simulation
+区域填写
+team_size
+（例如：3）。
+•
+Robot_type
+选择 k1
+•
+zmq_port
+和
+webview_port
+选项可留空，Manager 会自动为您分配可用端口。
+•
+webview
+选true，后续可打开仿真页面
+•
+use_referee
+选true，用于打开裁判盒
+•
+配置完成后，点击
+Start
+按钮。
+2. 查看当前实例
+在
+Scanned Sim Processes
+列表中，您可以查看当前运行实例的详细信息：
+04
+网页端操作流程(Webview)
+点击 webview 链接后，可看到如下仿真环境：
+05
+启动决策端(Decider)
+打开新终端后，进入
+sim_soccer2
+项目根目录即可配置并启动决策端。
+方式 A：单机器人启动（推荐用于调试）
+打开新的终端，激活
+k1
+环境，并使用 Sim Manager 分配的 ZMQ 端口分别启动红蓝队伍的机器人：
+cd /opt/sim_soccer2
+conda activate k1
+# 启动红队
+0
+号（请将
+--port
+替换为 Sim Manager 分配的 ZMQ 端口）
+python3 decider/decider
+.py
+--simulation
+--ip
+127.0
+.
+0.1
+--port
+5555
+--color
+red
+--id
+0
+# 启动蓝队
+0
+号
+python3 decider/decider
+.py
+--simulation
+--ip
+127.0
+.
+0.1
+--port
+5555
+--color
+blue
+--id
+0
+核心启动参数说明：
+方式 B：一键启动整支球队（适用于 Linux / macOS）
+使用该脚本，系统会通过
+screen
+工具为每个机器人单独创建一个会话，方便批量管理：
+# 按 match_config 默认配置自动启动整队
+./decider/scripts/start_team.sh
+# 自定义启动数量（例如：红队 2 台，蓝队 1 台）
+./decider/scripts/start_team.sh --red 2 --blue 1
+# 重启全部机器人
+./decider/scripts/start_team.sh --restart
+# 停止全部机器人
+./decider/scripts/start_team.sh --
+kill
+进入/查看特定机器人的日志：
+输入
+screen -r decider_red_0
+进入会话。
+退出日志会话（不中断进程）：
+在键盘上依次按下
+Ctrl+A
+然后按
+D
+退出。
+即刻报名·
+参与角逐
+全程在线 · 零硬件门槛
+扫描下方二维码报名
+MotrixSim · MotrixLab · RoboGo 强力支持
+▲
+开启机器人仿真训练
+📱
+扫码一起开始强化学习（线上免费训练营）
+▎ 项目地址
+github.com/Motphys/MotrixSim
+▎ 文档地址
+motrixsim.readthedocs.io
+欢迎加入种子用户群
+主办方
+首席本体赞助
+协办方
+活动特别支持方
+以上排名不分先后
+本次赛事平台由猛狮科技提供技术服务
+关于 Motphys
+Motphys 是国产具身仿真技术的首批开拓者。公司以完全自主研发的
+MotrixSim 物理仿真引擎
+为底座，向上构建了覆盖具身智能全链路的产品体系：支持强化学习与 VLA 模型训练的
+MotrixLab 训练平台
+、面向 3D 资产快速构建的
+MotrixGen 生成工具
+，以及打通虚实之间的
+Real2Sim2Real 合成数据管线
+。从物理引擎算法到机器人训练落地，全栈自研，无底层依赖，可良好适配国产芯片生态。
+点击
+阅读原文
+查看 MotrixSim 开源文档

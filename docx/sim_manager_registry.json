@@ -1,0 +1,38 @@
+{
+  "managed": {
+    "e0f9614b-84a6-4f87-9c92-54f327cf0aad": {
+      "sim_id": "e0f9614b-84a6-4f87-9c92-54f327cf0aad",
+      "pid": 31704,
+      "created_at": 1779334758.6173892,
+      "team_size": 1,
+      "robot_type": "k1",
+      "zmq_port": 5555,
+      "webview_port": 5811,
+      "args": [
+        "/home/1ctnltug/miniconda3/envs/motrixsim0508/bin/python",
+        "/opt/sim_soccer2/simulation/motrixsim/sim2sim_runner.py",
+        "--robot-type",
+        "k1",
+        "--team-size",
+        "1",
+        "--port",
+        "5555",
+        "--webview-port",
+        "5811",
+        "--web-fps",
+        "10",
+        "--web-width",
+        "800",
+        "--web-height",
+        "600",
+        "--policy-device",
+        "cpu",
+        "--webview",
+        "--real-time",
+        "--no-allow-keyboard-control",
+        "--zmq",
+        "--no-use-referee"
+      ]
+    }
+  }
+}

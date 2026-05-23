@@ -1,3 +1,38 @@
 {
-  "managed": {}
+  "managed": {
+    "f99d9ce2-e1a3-492c-9df6-9b03e31079d8": {
+      "sim_id": "f99d9ce2-e1a3-492c-9df6-9b03e31079d8",
+      "pid": 13137,
+      "created_at": 1779011628.2676768,
+      "team_size": 1,
+      "robot_type": "k1",
+      "zmq_port": 5555,
+      "webview_port": 5811,
+      "args": [
+        "/home/l9k_1hyq/anaconda3/envs/motrixsim0508/bin/python",
+        "/home/l9k_1hyq/sim_soccer2/simulation/motrixsim/sim2sim_runner.py",
+        "--robot-type",
+        "k1",
+        "--team-size",
+        "1",
+        "--port",
+        "5555",
+        "--webview-port",
+        "5811",
+        "--web-fps",
+        "10",
+        "--web-width",
+        "800",
+        "--web-height",
+        "600",
+        "--policy-device",
+        "gpu",
+        "--webview",
+        "--real-time",
+        "--no-allow-keyboard-control",
+        "--zmq",
+        "--use-referee"
+      ]
+    }
+  }
 }
