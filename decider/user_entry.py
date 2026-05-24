@@ -453,6 +453,10 @@ def _gc_test_go_back_to_field(agent):
 
         # 2. Chase Ball
         ball_dist = agent.get_ball_distance()
+        if getattr(agent, "is_simulation", False):
+            _simple_sim_chase(agent, ball_dist)
+            return
+
         if ball_dist > agent.default_chase_distance:
             logger.info(f"[GC_TEST] -> chase_ball (distance={ball_dist:.2f} > {agent.default_chase_distance:.2f})")
             agent.state_machine_runners['chase_ball']()
@@ -465,6 +469,41 @@ def _gc_test_go_back_to_field(agent):
     
     logger.warning(f"[GC_TEST] Unknown state: {state} -> stop")
     agent.stop()  
+
+def _simple_sim_chase(agent, ball_dist: float) -> None:
+    """Small simulation controller for validating locomotion before full tactics."""
+    logger = agent.get_logger()
+    ball_pos = agent.get_ball_pos()
+    if ball_pos is None or ball_pos[0] is None or ball_pos[1] is None:
+        agent.state_machine_runners['find_ball']()
+        return
+
+    ball_x = float(ball_pos[0])
+    ball_y = float(ball_pos[1])
+    ball_angle = agent.get_ball_angle()
+    if ball_angle is None:
+        agent.stop()
+        return
+
+    abs_angle = abs(ball_angle)
+    if abs_angle > 1.35:
+        cmd_x = 0.0
+        cmd_y = 0.0
+        cmd_w = float(np.clip(0.75 * ball_angle, -0.7, 0.7))
+    else:
+        alignment = max(0.0, math.cos(ball_angle))
+        cmd_x = 0.22 + 0.48 * alignment
+        if ball_dist < 0.55:
+            cmd_x = 0.35
+        cmd_y = float(np.clip(0.45 * ball_y, -0.25, 0.25))
+        cmd_w = float(np.clip(0.65 * ball_angle, -0.55, 0.55))
+
+    logger.info(
+        f"[SIM_CHASE] ball=({ball_x:.2f},{ball_y:.2f}) dist={ball_dist:.2f} "
+        f"angle={math.degrees(ball_angle):.1f} cmd=({cmd_x:.2f},{cmd_y:.2f},{cmd_w:.2f})"
+    )
+    agent.cmd_vel(cmd_x, cmd_y, cmd_w)
+    agent.move_head(math.inf, math.inf)
 
 def _test_agents(agent):
     """
