@@ -53,7 +53,7 @@ class ControlConfig:
             "Right_Ankle_Roll": 1.0,
         }
     )
-    action_scale: float = 1.0
+    action_scale: float = 0.35
     torque_limit: float = 40.0
 
 
@@ -74,8 +74,8 @@ class InitState:
 @dataclass
 class Commands:
     vel_limit = [
-        [-0.5, -0.3, -0.5],
-        [0.8, 0.3, 0.5],
+        [0.25, -0.05, -0.10],
+        [0.65, 0.05, 0.10],
     ]
 
 
@@ -109,19 +109,19 @@ class RewardConfig:
     scales: dict[str, float] = field(
         default_factory=lambda: {
             "termination": -0.5,
-            "tracking_lin_vel": 1.0,
-            "tracking_ang_vel": 0.5,
+            "tracking_lin_vel": 3.0,
+            "tracking_ang_vel": 0.25,
             "lin_vel_z": -2.0,
             "ang_vel_xy": -0.05,
             "orientation": -1.0,
-            "base_height": -2.0,
-            "torques": -0.0001,
-            "dof_vel": -0.001,
-            "dof_acc": -2.5e-6,
-            "action_rate": -0.005,
-            "joint_regularization": -0.05,
-            "feet_air_time": 1.0,
-            "collision": -1.0,
+            "base_height": -4.0,
+            "torques": -0.0002,
+            "dof_vel": -0.003,
+            "dof_acc": -5.0e-6,
+            "action_rate": -0.02,
+            "joint_regularization": -0.2,
+            "feet_air_time": 0.1,
+            "collision": -2.0,
         }
     )
     tracking_sigma: float = 0.25

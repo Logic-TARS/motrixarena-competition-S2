@@ -51,7 +51,10 @@ class rslrl:
             runner.experiment_name = "k1_flat_terrain_walk"
             runner.actor.hidden_dims = [256, 128, 64]
             runner.critic.hidden_dims = [256, 128, 64]
+            runner.actor.init_noise_std = 0.5
 
             algo.learning_rate = 3e-4
             algo.num_learning_epochs = 5
             algo.num_mini_batches = 3
+            algo.entropy_coef = 0.001
+            algo.desired_kl = 0.008
