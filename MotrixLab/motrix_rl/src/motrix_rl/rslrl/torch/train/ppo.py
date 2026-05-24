@@ -41,6 +41,8 @@ class Trainer:
     _sim_backend: str
     _rlcfg: RslrlCfg
     _enable_render: bool
+    _resume_policy: str | None
+    _resume_noise_std: float | None
 
     def __init__(
         self,
@@ -48,6 +50,8 @@ class Trainer:
         sim_backend: str = None,
         enable_render: bool = False,
         cfg_override: dict = None,
+        resume_policy: str | None = None,
+        resume_noise_std: float | None = None,
     ) -> None:
         """Initialize the RSLRL PPO trainer.
 
@@ -64,6 +68,8 @@ class Trainer:
         self._env_name = env_name
         self._sim_backend = sim_backend
         self._enable_render = enable_render
+        self._resume_policy = resume_policy
+        self._resume_noise_std = resume_noise_std
 
     def train(self) -> None:
         """Start training the agent.
@@ -93,6 +99,14 @@ class Trainer:
         runner = OnPolicyRunner(
             vec_env, rslrl_cfg, log_dir=get_log_dir(self._env_name, rllib="rslrl", agent_name="PPO"), device=device
         )
+        if self._resume_policy:
+            logger.info(f"Resuming training from {self._resume_policy}")
+            runner.load(self._resume_policy, map_location=str(device))
+            if self._resume_noise_std is not None:
+                if not hasattr(runner.alg.actor, "std"):
+                    raise AttributeError("Loaded RSLRL actor does not expose a trainable std parameter")
+                runner.alg.actor.std.data.fill_(self._resume_noise_std)
+                logger.info(f"Reset actor exploration noise std to {self._resume_noise_std}")
 
         # Start training
         logger.info(f"Starting training for {self._env_name}")

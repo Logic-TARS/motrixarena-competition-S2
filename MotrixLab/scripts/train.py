@@ -39,6 +39,13 @@ _TRAIN_BACKEND = flags.DEFINE_string("train-backend", None, "The learning backen
 _SEED = flags.DEFINE_integer("seed", None, "Random seed for reproducibility")
 _RAND_SEED = flags.DEFINE_bool("rand-seed", False, "Generate random seed")
 _RLLIB = flags.DEFINE_string("rllib", "skrl", "The RL framework (skrl/rslrl)")
+_RESUME_POLICY = flags.DEFINE_string("resume-policy", None, "Policy checkpoint to resume training from")
+_RESUME_NOISE_STD = flags.DEFINE_float(
+    "resume-noise-std",
+    None,
+    "Reset actor exploration noise std after loading --resume-policy",
+)
+_MAX_ITERATIONS = flags.DEFINE_integer("max-iterations", None, "Override number of learning iterations")
 
 
 def get_train_backend(supports: utils.DeviceSupports, train_backend_arg: str | None, rllib: str):
@@ -102,6 +109,9 @@ def main(argv):
     elif _SEED.present:
         rl_override["runner.seed"] = _SEED.value
 
+    if _MAX_ITERATIONS.present:
+        rl_override["runner.max_iterations"] = _MAX_ITERATIONS.value
+
     sim_backend = _SIM_BACKEND.value
     rllib = _RLLIB.value
 
@@ -115,15 +125,26 @@ def main(argv):
         assert train_backend == "torch", "RSLRL only supports PyTorch backend"
         from motrix_rl.rslrl.torch.train import ppo
 
-        trainer = ppo.Trainer(env_name, sim_backend, cfg_override=rl_override, enable_render=enable_render)
+        trainer = ppo.Trainer(
+            env_name,
+            sim_backend,
+            cfg_override=rl_override,
+            enable_render=enable_render,
+            resume_policy=_RESUME_POLICY.value,
+            resume_noise_std=_RESUME_NOISE_STD.value,
+        )
 
     elif train_backend == "jax":
+        if _RESUME_POLICY.present or _RESUME_NOISE_STD.present:
+            raise Exception("--resume-policy/--resume-noise-std is only supported for --rllib rslrl in this script")
         from motrix_rl.skrl.jax.train import ppo
 
         config.jax.backend = "jax"  # or "numpy"
         trainer = ppo.Trainer(env_name, sim_backend, cfg_override=rl_override, enable_render=enable_render)
 
     elif train_backend == "torch":
+        if _RESUME_POLICY.present or _RESUME_NOISE_STD.present:
+            raise Exception("--resume-policy/--resume-noise-std is only supported for --rllib rslrl in this script")
         from motrix_rl.skrl.torch.train import ppo
 
         trainer = ppo.Trainer(env_name, sim_backend, cfg_override=rl_override, enable_render=enable_render)
