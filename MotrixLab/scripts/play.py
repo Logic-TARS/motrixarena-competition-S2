@@ -16,6 +16,10 @@
 import logging
 from pathlib import Path
 
+from _source_path import ensure_source_path
+
+ensure_source_path()
+
 from absl import app, flags
 from skrl import config
 

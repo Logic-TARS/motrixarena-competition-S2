@@ -15,14 +15,10 @@
 
 
 import logging
-import sys
-from pathlib import Path
 
-ROOT_DIR = Path(__file__).resolve().parents[1]
-for src_dir in (ROOT_DIR / "motrix_envs" / "src", ROOT_DIR / "motrix_rl" / "src"):
-    src = str(src_dir)
-    if src not in sys.path:
-        sys.path.insert(0, src)
+from _source_path import ensure_source_path
+
+ensure_source_path()
 
 from absl import app, flags
 from skrl import config

@@ -15,6 +15,10 @@
 
 import argparse
 
+from _source_path import ensure_source_path
+
+ensure_source_path()
+
 import numpy as np
 
 from motrix_envs import registry

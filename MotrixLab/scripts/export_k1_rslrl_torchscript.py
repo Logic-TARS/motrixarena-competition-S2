@@ -16,6 +16,10 @@
 import argparse
 from pathlib import Path
 
+from _source_path import ensure_source_path
+
+ensure_source_path()
+
 import torch
 from rsl_rl.runners import OnPolicyRunner
 from tensordict import TensorDict
