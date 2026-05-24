@@ -1,28 +1,33 @@
-
-
-cat > .gitignore << 'EOF'
-# Python 缓存与编译文件
+# Python cache and compiled files
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 .Python
 
-# 日志与调试文件
+# Logs, generated debug output, and temporary archives
 logs/
 debug_logs/
 *.log
-legged_gym/sim_soccer2/
+*.zip
+*.bak
+*.old
 
-# 虚拟环境与依赖
+# Local/generated project copies and one-off materials
+docx/
+examples/
 envs/
+legged_gym/sim_soccer2/
+* (copy).*
+
+# Virtual environments and build outputs
 venv/
 .venv/
 *.egg-info/
 dist/
 build/
 
-# 编辑器与系统文件
+# Editors and OS files
 .vscode/
 .idea/
 .DS_Store

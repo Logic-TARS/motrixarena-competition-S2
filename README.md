@@ -42,10 +42,14 @@ mos-sim/
 │   │   ├── strategy_statemachines/# 战术级状态机（进攻、防守等）
 │   │   └── policy_statemachines/  # 策略级状态机（守门员等）
 │   └── scripts/               # 整队启动、部署脚本
-└── simulation/                # 仿真模块
-    ├── motrixsim/             # MotrixSim 仿真环境（主推）
-    ├── isaac_sim/             # Isaac Sim 仿真环境（旧版）
-    └── labbridge/             # WebView / Bridge / Sim Manager
+├── simulation/                # 仿真模块
+│   ├── motrixsim/             # MotrixSim 仿真环境（主推）
+│   ├── isaac_sim/             # Isaac Sim 仿真环境（旧版）
+│   └── labbridge/             # WebView / Bridge / Sim Manager
+├── MotrixLab/                 # 强化学习训练框架
+├── legged_gym/                # K1 资源和旧 policy 兼容目录
+├── model_20000_new.onnx       # 默认 K1 policy
+└── model_4700.pt              # 默认 K1 TorchScript policy
 ```
 
 ### 2.1 Decider 决策模块（`decider/`）
@@ -57,6 +61,10 @@ mos-sim/
 - **`motrixsim/`**：基于 MotrixSim 的物理仿真环境，**当前主推的仿真引擎**，附带基于 FastAPI 的可视化管理器（Sim Manager），方便在网页端启停和管理多个仿真实例。
 - **`isaac_sim/`**：基于 NVIDIA Isaac Sim 的仿真环境（旧版，主实现已迁移到 MotrixSim）。
 - **`labbridge/`**：独立的 WebView、通信桥梁（Bridge）以及仿真进程管理模块，负责仿真环境与外部界面的通信。
+
+### 2.3 MotrixLab 训练模块（`MotrixLab/`）
+
+强化学习训练子项目。K1 训练环境在 `MotrixLab/motrix_envs/src/motrix_envs/locomotion/k1/`，训练脚本在 `MotrixLab/scripts/`。
 
 
 
