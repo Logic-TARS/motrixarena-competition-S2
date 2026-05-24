@@ -276,6 +276,8 @@ class K1WalkTask(NpEnv):
         result = {
             "tracking_lin_vel": self._reward_tracking_lin_vel(data, commands),
             "tracking_ang_vel": self._reward_tracking_ang_vel(data, commands),
+            "command_forward_vel": self._reward_command_forward_vel(data, commands),
+            "stand_still": self._reward_stand_still(data, commands),
             "lin_vel_z": self._reward_lin_vel_z(data),
             "ang_vel_xy": self._reward_ang_vel_xy(data),
             "orientation": self._reward_orientation(data),
@@ -335,6 +337,16 @@ class K1WalkTask(NpEnv):
     def _reward_tracking_ang_vel(self, data, commands: np.ndarray):
         ang_vel_error = np.square(commands[:, 2] - self.get_gyro(data)[:, 2])
         return np.exp(-ang_vel_error / self.cfg.reward_config.tracking_sigma)
+
+    def _reward_command_forward_vel(self, data, commands: np.ndarray):
+        forward_vel = self.get_local_linvel(data)[:, 0]
+        command_vel = np.maximum(commands[:, 0], 1.0e-5)
+        return np.clip(forward_vel, 0.0, command_vel) / command_vel
+
+    def _reward_stand_still(self, data, commands: np.ndarray):
+        command_speed = np.linalg.norm(commands[:, :2], axis=1)
+        actual_speed = np.linalg.norm(self.get_local_linvel(data)[:, :2], axis=1)
+        return ((command_speed > 0.2) & (actual_speed < 0.08)).astype(np.float32)
 
     def _reward_joint_regularization(self, data):
         return np.sum(np.square(self.get_dof_pos(data) - self.default_angles), axis=1)

@@ -74,8 +74,8 @@ class InitState:
 @dataclass
 class Commands:
     vel_limit = [
-        [0.25, -0.05, -0.10],
-        [0.65, 0.05, 0.10],
+        [0.35, 0.0, 0.0],
+        [0.55, 0.0, 0.0],
     ]
 
 
@@ -109,8 +109,10 @@ class RewardConfig:
     scales: dict[str, float] = field(
         default_factory=lambda: {
             "termination": -0.5,
-            "tracking_lin_vel": 3.0,
+            "tracking_lin_vel": 2.0,
             "tracking_ang_vel": 0.25,
+            "command_forward_vel": 2.0,
+            "stand_still": -1.0,
             "lin_vel_z": -2.0,
             "ang_vel_xy": -0.05,
             "orientation": -1.0,
@@ -124,7 +126,7 @@ class RewardConfig:
             "collision": -2.0,
         }
     )
-    tracking_sigma: float = 0.25
+    tracking_sigma: float = 0.08
     min_base_height: float = 0.35
     max_foot_height: float = 0.15
     target_base_height: float = 0.55
