@@ -58,3 +58,49 @@ class rslrl:
             algo.num_mini_batches = 3
             algo.entropy_coef = 0.001
             algo.desired_kl = 0.008
+
+    @rlcfg("k1-ball-navigate")
+    @dataclass
+    class K1BallNavigateRslrlPpo(RslrlCfg):
+        def __post_init__(self):
+            runner = self.runner
+            algo = runner.algorithm
+
+            self.num_envs = 256
+            runner.seed = 42
+            runner.max_iterations = 3000
+            runner.num_steps_per_env = 24
+            runner.save_interval = 50
+            runner.experiment_name = "k1_ball_navigate"
+            runner.actor.hidden_dims = [256, 128, 64]
+            runner.critic.hidden_dims = [256, 128, 64]
+            runner.actor.init_noise_std = 0.5
+
+            algo.learning_rate = 3e-4
+            algo.num_learning_epochs = 5
+            algo.num_mini_batches = 3
+            algo.entropy_coef = 0.001
+            algo.desired_kl = 0.008
+
+    @rlcfg("k1-point-navigate")
+    @dataclass
+    class K1PointNavigateRslrlPpo(RslrlCfg):
+        def __post_init__(self):
+            runner = self.runner
+            algo = runner.algorithm
+
+            self.num_envs = 256
+            runner.seed = 42
+            runner.max_iterations = 3000
+            runner.num_steps_per_env = 24
+            runner.save_interval = 50
+            runner.experiment_name = "k1_point_navigate"
+            runner.actor.hidden_dims = [256, 128, 64]
+            runner.critic.hidden_dims = [256, 128, 64]
+            runner.actor.init_noise_std = 0.5
+
+            algo.learning_rate = 3e-4
+            algo.num_learning_epochs = 5
+            algo.num_mini_batches = 3
+            algo.entropy_coef = 0.001
+            algo.desired_kl = 0.008

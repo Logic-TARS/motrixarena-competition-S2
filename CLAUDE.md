@@ -19,6 +19,9 @@ Two separate Conda environments are required:
 |---|---|---|---|
 | `motrixsim0508` | 3.12 | Simulation (MotrixSim) + Sim Manager | `simulation/motrixsim/requirements.txt` |
 | `k2` | 3.8 | Decider decision logic | `decider/requirements.txt` |
+| `sim_soccer_rl` | 3.10 | K1 RL training (MotrixLab) | UV-managed (`MotrixLab/`) |
+
+> **Note:** The MotrixLab sub-project uses UV for its own dependency management (`uv sync`/`uv run`). The `train_k1.sh` wrapper invokes it via `conda run -n sim_soccer_rl`. See [MotrixLab/CLAUDE.md](MotrixLab/CLAUDE.md) for full RL training details.
 
 ```bash
 # Simulation env
@@ -72,6 +75,14 @@ uv run scripts/view.py --env cartpole          # visualize
 uv run pytest                                  # run tests
 ```
 
+Available K1 environment names: `k1-flat-terrain-walk`, `k1-point-navigation`, `k1-ball-navigation`.
+
+### K1 Locomotion Smoke Test
+```bash
+cd MotrixLab
+conda run -n sim_soccer_rl env PYTHONPATH=./motrix_envs/src:./motrix_rl/src python scripts/smoke_k1_env.py --num-envs 4 --steps 16 --zero-action
+```
+
 ## Architecture
 
 ### Decider (`decider/`)
@@ -96,6 +107,7 @@ uv run pytest                                  # run tests
 ### RL Training (`MotrixLab/`)
 - Standalone RL training framework (UV workspace with `motrix_envs` and `motrix_rl` packages).
 - K1 locomotion environment lives under `MotrixLab/motrix_envs/src/motrix_envs/locomotion/k1/`.
+- Has its own [MotrixLab/CLAUDE.md](MotrixLab/CLAUDE.md) with full RL training documentation (RSLRL, SKRL, RSLRL config constraints, etc.).
 
 ### Communication
 - ZMQ REQ/REQ pattern over TCP. Each robot uses one port.
@@ -145,6 +157,19 @@ agent.state_machine_runners['goalkeeper']()
 - **No test framework** for the decider module. The `transitions` library (v0.9.2) is used for implementing hierarchical state machines.
 - ROS2 is optional; all simulation work uses `--simulation` flag (no ROS dependencies).
 - Decider uses Python 3.8 (old). Don't introduce syntax/features incompatible with 3.8.
-- The `legged_gym/` directory is a detached copy of another project — treat as reference only.
-- `config.yaml` is the single source of truth for tunable parameters; avoid hardcoding magic numbers in strategy code.
+- The `legged_gym/` directory is a detached copy of another project — treat as reference only. **Do not move or delete it** — training configs hardcode paths like `legged_gym/resources/robots/K1/k1_train_scene.xml` and `legged_gym/policy/booster_k1/model_4700.onnx`.
+- Root-level model files (`model_20000_new.onnx`, `model_4700.pt`) are default policy paths referenced by runtime configs — do not remove.
+- `config.yaml` is the single source of truth for tunable parameters; avoid hardcoding magic numbers in strategy code. Optional `config_override.json/yaml/yml` files are deep-merged on top at load time.
 - Field size presets: S = 9x6m, M = 14x9m, L = 22x14m (configured via `config.yaml` league field).
+
+### K1 Policy Mixing (sim2sim_runner.py)
+When the leg-control policy (`model_4700.pt`, 47→12) is active and `assets/policies/k1_model_46000.pt` exists, `sim2sim_runner.py` auto-mixes: small velocity commands use the 46000 full-body policy (standing/upper-body posture), while larger commands switch to the 4700 leg-control policy (with hysteresis to avoid oscillation). Disable with `--no-k1-legged-gym`.
+
+### Multi-Agent Strategy (WIP)
+`decider/strategy/team_manager.py` implements a multi-agent coordination system (role assignment, world model fusion) — intended architecture for team play, currently work-in-progress.
+
+### Active game() Function
+The active function in `decider/user_entry.py` is `_gc_test_go_back_to_field` (GameController test mode). Other test modes exist in the same file (`_playing_logic`, `_test_adv_dribble`, etc.). Switch by editing the `game()` function body.
+
+### Docker (Isaac Sim, legacy)
+`Dockerfile` and `compose.yaml` target the NVIDIA Isaac Sim image — this is a legacy/alternate deployment path, not the primary MotrixSim workflow.

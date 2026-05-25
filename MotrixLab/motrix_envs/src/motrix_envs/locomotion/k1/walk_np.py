@@ -34,6 +34,7 @@ class K1WalkTask(NpEnv):
         self._num_observation = self._observation_space.shape[0]
         self._num_dof_pos = self._model.num_dof_pos
         self._num_dof_vel = self._model.num_dof_vel
+        self._joint_dof_pos_indices = self._get_actuated_dof_pos_indices()
         self._init_dof_vel = np.zeros((self._num_dof_vel,), dtype=np.float32)
         self._init_dof_pos = self._model.compute_init_dof_pos()
         self._init_buffer()
@@ -79,9 +80,18 @@ class K1WalkTask(NpEnv):
     def get_dof_vel(self, data: mtx.SceneData):
         return self._body.get_joint_dof_vel(data)
 
+    def _get_actuated_dof_pos_indices(self) -> np.ndarray:
+        indices = np.asarray(self._body.get_dof_pos_indices(), dtype=np.int64).reshape(-1)
+        if indices.size < self._num_action:
+            # K1 has a floating base followed by 12 actuated joints in the train assets.
+            return np.arange(7, 7 + self._num_action, dtype=np.int64)
+        return indices[-self._num_action :]
+
     def _init_buffer(self):
         cfg = self._cfg
-        assert isinstance(cfg, K1WalkNpEnvCfg)
+        from motrix_envs.locomotion.k1.cfg import K1BallNavigateEnvCfg, K1PointNavigateEnvCfg  # noqa: F811
+
+        assert isinstance(cfg, (K1WalkNpEnvCfg, K1BallNavigateEnvCfg, K1PointNavigateEnvCfg))
 
         self.gravity_vec = np.array([0, 0, -1], dtype=np.float32)
         self.commands_scale = np.array(
@@ -101,7 +111,7 @@ class K1WalkTask(NpEnv):
             self.kds[i] = cfg.control_config.damping[name]
 
         self._init_dof_pos[:3] = np.asarray(cfg.init_state.pos, dtype=np.float32)
-        self._init_dof_pos[-self._num_action :] = self.default_angles
+        self._init_dof_pos[self._joint_dof_pos_indices] = self.default_angles
 
         # Build foot contact pairs (foot geoms <-> ground), separated by left/right.
         # The current K1 MJCF leaves most geom names empty in MotrixSim, so cfg index
@@ -241,6 +251,7 @@ class K1WalkTask(NpEnv):
         rewards = {k: v * self.cfg.reward_config.scales[k] for k, v in reward_dict.items()}
         rwd = sum(rewards.values())
         rwd = np.clip(rwd, 0.0, 10000.0)
+        rwd = np.where(state.terminated, 0.0, rwd)
         if "termination" in self.cfg.reward_config.scales:
             rwd += self._reward_termination(state.terminated) * self.cfg.reward_config.scales["termination"]
         return state.replace(reward=rwd)
@@ -252,7 +263,7 @@ class K1WalkTask(NpEnv):
         dof_pos = np.tile(self._init_dof_pos, (num_reset, 1))
         dof_vel = np.tile(self._init_dof_vel, (num_reset, 1))
 
-        dof_pos[:, -self._num_action :] += 0.01 * np.random.randn(num_reset, self._num_action)
+        dof_pos[:, self._joint_dof_pos_indices] += 0.01 * np.random.randn(num_reset, self._num_action)
 
         data.set_dof_vel(dof_vel)
         data.set_dof_pos(dof_pos, self._model)
@@ -274,9 +285,12 @@ class K1WalkTask(NpEnv):
     def _get_reward(self, data: mtx.SceneData, info: dict) -> dict[str, np.ndarray]:
         commands = info["commands"]
         result = {
+            "alive": self._reward_alive(data),
             "tracking_lin_vel": self._reward_tracking_lin_vel(data, commands),
             "tracking_ang_vel": self._reward_tracking_ang_vel(data, commands),
             "command_forward_vel": self._reward_command_forward_vel(data, commands),
+            "overspeed": self._reward_overspeed(data, commands),
+            "straight_motion": self._reward_straight_motion(data, commands),
             "stand_still": self._reward_stand_still(data, commands),
             "lin_vel_z": self._reward_lin_vel_z(data),
             "ang_vel_xy": self._reward_ang_vel_xy(data),
@@ -330,9 +344,16 @@ class K1WalkTask(NpEnv):
     def _reward_termination(self, done):
         return done
 
+    def _reward_alive(self, data):
+        return np.ones((data.shape[0],), dtype=np.float32)
+
     def _reward_tracking_lin_vel(self, data, commands: np.ndarray):
         lin_vel_error = np.sum(np.square(commands[:, :2] - self.get_local_linvel(data)[:, :2]), axis=1)
-        return np.exp(-lin_vel_error / self.cfg.reward_config.tracking_sigma)
+        return (
+            np.exp(-lin_vel_error / self.cfg.reward_config.tracking_sigma)
+            * self._reward_forward_posture_gate(data)
+            * self._reward_forward_straight_gate(data, commands)
+        )
 
     def _reward_tracking_ang_vel(self, data, commands: np.ndarray):
         ang_vel_error = np.square(commands[:, 2] - self.get_gyro(data)[:, 2])
@@ -341,7 +362,51 @@ class K1WalkTask(NpEnv):
     def _reward_command_forward_vel(self, data, commands: np.ndarray):
         forward_vel = self.get_local_linvel(data)[:, 0]
         command_vel = np.maximum(commands[:, 0], 1.0e-5)
-        return np.clip(forward_vel, 0.0, command_vel) / command_vel
+        reward = np.clip(forward_vel, 0.0, command_vel) / command_vel
+        return reward * self._reward_forward_posture_gate(data) * self._reward_forward_straight_gate(data, commands)
+
+    def _reward_overspeed(self, data, commands: np.ndarray):
+        forward_vel = self.get_local_linvel(data)[:, 0]
+        max_forward_vel = commands[:, 0] + self.cfg.reward_config.forward_vel_margin
+        return np.square(np.maximum(forward_vel - max_forward_vel, 0.0))
+
+    def _reward_straight_motion(self, data, commands: np.ndarray):
+        cfg = self.cfg.reward_config
+        local_vel = self.get_local_linvel(data)
+        yaw_error = self.get_gyro(data)[:, 2] - commands[:, 2]
+        return cfg.straight_motion_yaw_weight * np.square(yaw_error) + cfg.straight_motion_lateral_weight * np.square(
+            local_vel[:, 1]
+        )
+
+    def _reward_forward_posture_gate(self, data):
+        pose = self._body.get_pose(data)
+        base_quat = pose[:, 3:7]
+        gravity = quaternion.rotate_inverse(base_quat, self.gravity_vec)
+        tilt_xy = np.linalg.norm(gravity[:, :2], axis=1)
+
+        cfg = self.cfg.reward_config
+        height_span = max(cfg.forward_reward_full_height - cfg.forward_reward_min_height, 1.0e-5)
+        height_gate = np.clip((pose[:, 2] - cfg.forward_reward_min_height) / height_span, 0.0, 1.0)
+
+        tilt_span = max(cfg.forward_reward_max_tilt_xy - cfg.forward_reward_full_tilt_xy, 1.0e-5)
+        tilt_gate = np.clip((cfg.forward_reward_max_tilt_xy - tilt_xy) / tilt_span, 0.0, 1.0)
+        gate = height_gate * tilt_gate
+        return (cfg.forward_reward_min_gate + (1.0 - cfg.forward_reward_min_gate) * gate).astype(np.float32)
+
+    def _reward_forward_straight_gate(self, data, commands: np.ndarray):
+        cfg = self.cfg.reward_config
+        local_vel = self.get_local_linvel(data)
+        yaw_error = np.abs(self.get_gyro(data)[:, 2] - commands[:, 2])
+        lateral_vel = np.abs(local_vel[:, 1])
+
+        yaw_span = max(cfg.forward_reward_max_yaw_rate - cfg.forward_reward_full_yaw_rate, 1.0e-5)
+        yaw_gate = np.clip((cfg.forward_reward_max_yaw_rate - yaw_error) / yaw_span, 0.0, 1.0)
+
+        lateral_span = max(cfg.forward_reward_max_lateral_vel - cfg.forward_reward_full_lateral_vel, 1.0e-5)
+        lateral_gate = np.clip((cfg.forward_reward_max_lateral_vel - lateral_vel) / lateral_span, 0.0, 1.0)
+        return (cfg.forward_reward_min_gate + (1.0 - cfg.forward_reward_min_gate) * yaw_gate * lateral_gate).astype(
+            np.float32
+        )
 
     def _reward_stand_still(self, data, commands: np.ndarray):
         command_speed = np.linalg.norm(commands[:, :2], axis=1)

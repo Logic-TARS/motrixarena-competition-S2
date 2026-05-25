@@ -108,15 +108,18 @@ class Sensor:
 class RewardConfig:
     scales: dict[str, float] = field(
         default_factory=lambda: {
-            "termination": -0.5,
-            "tracking_lin_vel": 2.0,
+            "termination": -100.0,
+            "alive": 0.05,
+            "tracking_lin_vel": 1.5,
             "tracking_ang_vel": 0.25,
-            "command_forward_vel": 2.0,
+            "command_forward_vel": 0.3,
+            "overspeed": -8.0,
+            "straight_motion": -2.0,
             "stand_still": -1.0,
             "lin_vel_z": -2.0,
             "ang_vel_xy": -0.05,
-            "orientation": -1.0,
-            "base_height": -4.0,
+            "orientation": -3.0,
+            "base_height": -6.0,
             "torques": -0.0002,
             "dof_vel": -0.003,
             "dof_acc": -5.0e-6,
@@ -127,10 +130,22 @@ class RewardConfig:
         }
     )
     tracking_sigma: float = 0.08
-    min_base_height: float = 0.35
+    min_base_height: float = 0.45
     max_foot_height: float = 0.15
-    target_base_height: float = 0.55
-    max_tilt_xy: float = 0.8
+    target_base_height: float = 0.68
+    max_tilt_xy: float = 0.55
+    forward_vel_margin: float = 0.15
+    forward_reward_min_height: float = 0.45
+    forward_reward_full_height: float = 0.56
+    forward_reward_full_tilt_xy: float = 0.40
+    forward_reward_max_tilt_xy: float = 0.55
+    forward_reward_min_gate: float = 0.35
+    forward_reward_full_yaw_rate: float = 0.15
+    forward_reward_max_yaw_rate: float = 0.8
+    forward_reward_full_lateral_vel: float = 0.05
+    forward_reward_max_lateral_vel: float = 0.35
+    straight_motion_yaw_weight: float = 1.0
+    straight_motion_lateral_weight: float = 2.0
     gait_frequency: float = 1.5
 
 
@@ -146,5 +161,134 @@ class K1WalkNpEnvCfg(EnvCfg):
     normalization: Normalization = field(default_factory=Normalization)
     asset: Asset = field(default_factory=Asset)
     sensor: Sensor = field(default_factory=Sensor)
+    sim_dt: float = 0.002
+    ctrl_dt: float = 0.02
+
+
+@dataclass
+class BallConfig:
+    radius: float = 0.11
+    mass: float = 0.1
+    arrival_radius: float = 0.35
+    spawn_dist_min: float = 1.0
+    spawn_dist_max: float = 3.0
+    spawn_angle_max: float = 0.6
+    kick_speed_threshold: float = 0.5
+    command_forward_gain: float = 0.45
+    command_turn_gain: float = 1.2
+    command_max_forward_vel: float = 0.55
+    command_max_yaw_rate: float = 0.8
+    geom_name: str = "ball_geom"
+    body_name: str = "ball"
+
+
+@dataclass
+class BallRewardConfig(RewardConfig):
+    scales: dict[str, float] = field(
+        default_factory=lambda: {
+            "termination": -100.0,
+            "alive": 0.0,
+            "tracking_lin_vel": 0.8,
+            "tracking_ang_vel": 0.35,
+            "command_forward_vel": 0.2,
+            "overspeed": -8.0,
+            "straight_motion": -2.0,
+            "stand_still": -1.0,
+            "lin_vel_z": -2.0,
+            "ang_vel_xy": -0.05,
+            "orientation": -3.0,
+            "base_height": -6.0,
+            "torques": -0.0002,
+            "dof_vel": -0.003,
+            "dof_acc": -5.0e-6,
+            "action_rate": -0.02,
+            "joint_regularization": -0.2,
+            "feet_air_time": 0.1,
+            "collision": -2.0,
+            "approach_ball": 1.0,
+            "low_speed_penalty": -0.25,
+            "ball_velocity": 0.0,
+            "orientation_to_ball": 0.0,
+            "arrival_bonus": 80.0,
+        }
+    )
+
+
+@registry.envcfg("k1-ball-navigate")
+@dataclass
+class K1BallNavigateEnvCfg(EnvCfg):
+    max_episode_seconds: float = 20.0
+    model_file: str = "/opt/sim_soccer2/legged_gym/resources/robots/K1/k1_ball_scene.xml"
+    control_config: ControlConfig = field(default_factory=ControlConfig)
+    reward_config: BallRewardConfig = field(default_factory=BallRewardConfig)
+    init_state: InitState = field(default_factory=InitState)
+    commands: Commands = field(default_factory=Commands)
+    normalization: Normalization = field(default_factory=Normalization)
+    asset: Asset = field(default_factory=Asset)
+    sensor: Sensor = field(default_factory=Sensor)
+    ball_config: BallConfig = field(default_factory=BallConfig)
+    sim_dt: float = 0.002
+    ctrl_dt: float = 0.02
+
+
+@dataclass
+class PointNavigateConfig:
+    spawn_dist_min: float = 1.0
+    spawn_dist_max: float = 3.0
+    spawn_angle_max: float = 0.8
+    arrival_radius: float = 0.25
+    stop_speed_threshold: float = 0.15
+    command_forward_gain: float = 0.45
+    command_turn_gain: float = 1.2
+    command_max_forward_vel: float = 0.55
+    command_max_yaw_rate: float = 0.8
+
+
+@dataclass
+class PointNavigateRewardConfig(RewardConfig):
+    scales: dict[str, float] = field(
+        default_factory=lambda: {
+            "termination": -100.0,
+            "alive": 0.0,
+            "tracking_lin_vel": 0.8,
+            "tracking_ang_vel": 0.35,
+            "command_forward_vel": 0.2,
+            "overspeed": -8.0,
+            "straight_motion": -2.0,
+            "stand_still": -1.0,
+            "lin_vel_z": -2.0,
+            "ang_vel_xy": -0.05,
+            "orientation": -3.0,
+            "base_height": -6.0,
+            "torques": -0.0002,
+            "dof_vel": -0.003,
+            "dof_acc": -5.0e-6,
+            "action_rate": -0.02,
+            "joint_regularization": -0.2,
+            "feet_air_time": 0.1,
+            "collision": -2.0,
+            "progress_to_target": 1.0,
+            "heading_to_target": 0.0,
+            "low_speed_penalty": -0.25,
+            "arrival": 0.0,
+            "arrival_bonus": 80.0,
+            "stop_at_target": 0.0,
+        }
+    )
+
+
+@registry.envcfg("k1-point-navigate")
+@dataclass
+class K1PointNavigateEnvCfg(EnvCfg):
+    max_episode_seconds: float = 20.0
+    model_file: str = "/opt/sim_soccer2/legged_gym/resources/robots/K1/k1_train_scene.xml"
+    control_config: ControlConfig = field(default_factory=ControlConfig)
+    reward_config: PointNavigateRewardConfig = field(default_factory=PointNavigateRewardConfig)
+    init_state: InitState = field(default_factory=InitState)
+    commands: Commands = field(default_factory=Commands)
+    normalization: Normalization = field(default_factory=Normalization)
+    asset: Asset = field(default_factory=Asset)
+    sensor: Sensor = field(default_factory=Sensor)
+    point_config: PointNavigateConfig = field(default_factory=PointNavigateConfig)
     sim_dt: float = 0.002
     ctrl_dt: float = 0.02

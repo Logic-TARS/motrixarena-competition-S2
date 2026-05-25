@@ -101,7 +101,7 @@ class Trainer:
         )
         if self._resume_policy:
             logger.info(f"Resuming training from {self._resume_policy}")
-            runner.load(self._resume_policy, map_location=str(device))
+            self._load_resume_policy(runner, str(device))
             if self._resume_noise_std is not None:
                 if not hasattr(runner.alg.actor, "std"):
                     raise AttributeError("Loaded RSLRL actor does not expose a trainable std parameter")
@@ -184,3 +184,38 @@ class Trainer:
 
     def _create_rslrl_config(self) -> dict:
         return self._rlcfg.runner.to_dict()
+
+    def _load_resume_policy(self, runner: OnPolicyRunner, map_location: str) -> None:
+        loaded_dict = torch.load(self._resume_policy, weights_only=False, map_location=map_location)
+        loaded_dict["actor_state_dict"] = self._expand_state_dict(
+            loaded_dict["actor_state_dict"], runner.alg.actor.state_dict()
+        )
+        loaded_dict["critic_state_dict"] = self._expand_state_dict(
+            loaded_dict["critic_state_dict"], runner.alg.critic.state_dict()
+        )
+        runner.alg.load(
+            loaded_dict,
+            load_cfg={"actor": True, "critic": True, "optimizer": False, "iteration": False, "rnd": False},
+            strict=False,
+        )
+        logger.info("Loaded actor/critic warm start; skipped optimizer and checkpoint iteration.")
+
+    @staticmethod
+    def _expand_state_dict(source_state: dict, target_state: dict) -> dict:
+        expanded = {key: value.clone() for key, value in target_state.items()}
+        for key, source_value in source_state.items():
+            if key not in expanded:
+                continue
+            target_value = expanded[key]
+            if source_value.shape == target_value.shape:
+                expanded[key] = source_value
+                continue
+            if source_value.ndim == target_value.ndim == 1:
+                copy_len = min(source_value.shape[0], target_value.shape[0])
+                target_value[:copy_len] = source_value[:copy_len]
+            elif source_value.ndim == target_value.ndim == 2:
+                rows = min(source_value.shape[0], target_value.shape[0])
+                cols = min(source_value.shape[1], target_value.shape[1])
+                target_value[:rows, :cols] = source_value[:rows, :cols]
+            expanded[key] = target_value
+        return expanded

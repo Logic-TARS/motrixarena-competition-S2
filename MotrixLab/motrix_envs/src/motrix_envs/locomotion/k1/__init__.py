@@ -14,6 +14,8 @@
 # ==============================================================================
 
 from . import walk_np  # noqa: F401 register envs
-from .cfg import K1WalkNpEnvCfg  # noqa: F401
+from . import walk_ball_np  # noqa: F401 register envs
+from . import walk_point_np  # noqa: F401 register envs
+from .cfg import K1WalkNpEnvCfg, K1BallNavigateEnvCfg, K1PointNavigateEnvCfg  # noqa: F401
 
-__all__ = ["K1WalkNpEnvCfg"]
+__all__ = ["K1WalkNpEnvCfg", "K1BallNavigateEnvCfg", "K1PointNavigateEnvCfg"]
