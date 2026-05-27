@@ -115,18 +115,17 @@ class RewardConfig:
             "command_forward_vel": 0.3,
             "overspeed": -8.0,
             "straight_motion": -2.0,
-            "stand_still": -1.0,
             "lin_vel_z": -2.0,
             "ang_vel_xy": -0.05,
             "orientation": -3.0,
-            "base_height": -6.0,
+            "base_height": -2.0,
             "torques": -0.0002,
             "dof_vel": -0.003,
-            "dof_acc": -5.0e-6,
+            "dof_acc": -2.5e-6,
             "action_rate": -0.02,
             "joint_regularization": -0.2,
-            "feet_air_time": 0.1,
-            "collision": -2.0,
+            "feet_air_time": 1.0,
+            "collision": -1.0,
         }
     )
     tracking_sigma: float = 0.08
@@ -178,6 +177,23 @@ class BallConfig:
     command_turn_gain: float = 1.2
     command_max_forward_vel: float = 0.55
     command_max_yaw_rate: float = 0.8
+    close_control_radius: float = 0.8
+    close_command_max_forward_vel: float = 0.22
+    close_command_turn_gain: float = 0.8
+    kick_alignment_cos: float = 0.9
+    kick_target_dir: list[float] = field(default_factory=lambda: [1.0, 0.0])
+    kick_success_distance: float = 0.6
+    kick_push_forward_vel: float = 0.35
+    ball_progress_vel_clip: float = 1.2
+    goal_side_mode: str = "random"
+    goal_x_abs: float = 4.0
+    goal_width: float = 1.6
+    shot_arc_radius_min: float = 2.0
+    shot_arc_radius_max: float = 3.0
+    shot_arc_angle_max: float = 0.7853981633974483
+    robot_ball_backoff_min: float = 0.8
+    robot_ball_backoff_max: float = 1.2
+    robot_lateral_jitter: float = 0.15
     geom_name: str = "ball_geom"
     body_name: str = "ball"
 
@@ -193,23 +209,28 @@ class BallRewardConfig(RewardConfig):
             "command_forward_vel": 0.2,
             "overspeed": -8.0,
             "straight_motion": -2.0,
-            "stand_still": -1.0,
             "lin_vel_z": -2.0,
             "ang_vel_xy": -0.05,
             "orientation": -3.0,
-            "base_height": -6.0,
+            "base_height": -2.0,
             "torques": -0.0002,
             "dof_vel": -0.003,
-            "dof_acc": -5.0e-6,
+            "dof_acc": -2.5e-6,
             "action_rate": -0.02,
             "joint_regularization": -0.2,
-            "feet_air_time": 0.1,
-            "collision": -2.0,
-            "approach_ball": 1.0,
+            "feet_air_time": 1.0,
+            "collision": -1.0,
+            "approach_ball": 0.4,
             "low_speed_penalty": -0.25,
-            "ball_velocity": 0.0,
-            "orientation_to_ball": 0.0,
-            "arrival_bonus": 80.0,
+            "ball_forward_progress": 6.0,
+            "effective_kick": 5.0,
+            "face_ball": 0.5,
+            "near_ball": 0.0,
+            "stuck_near_ball": -1.0,
+            "gait_contact_phase": 0.25,
+            "single_foot_contact": 0.15,
+            "double_support_penalty": -0.10,
+            "arrival_bonus": 0.0,
         }
     )
 
@@ -255,18 +276,17 @@ class PointNavigateRewardConfig(RewardConfig):
             "command_forward_vel": 0.2,
             "overspeed": -8.0,
             "straight_motion": -2.0,
-            "stand_still": -1.0,
             "lin_vel_z": -2.0,
             "ang_vel_xy": -0.05,
             "orientation": -3.0,
-            "base_height": -6.0,
+            "base_height": -2.0,
             "torques": -0.0002,
             "dof_vel": -0.003,
-            "dof_acc": -5.0e-6,
+            "dof_acc": -2.5e-6,
             "action_rate": -0.02,
             "joint_regularization": -0.2,
-            "feet_air_time": 0.1,
-            "collision": -2.0,
+            "feet_air_time": 1.0,
+            "collision": -1.0,
             "progress_to_target": 1.0,
             "heading_to_target": 0.0,
             "low_speed_penalty": -0.25,

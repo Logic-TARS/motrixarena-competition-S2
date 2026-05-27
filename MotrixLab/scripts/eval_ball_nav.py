@@ -75,20 +75,27 @@ def evaluate(env, policy, device, num_envs, max_steps):
     state = env.init_state()
     obs = torch.from_numpy(state.obs).to(device)
 
-    reached = np.zeros(num_envs, dtype=bool)
+    goal_success = np.zeros(num_envs, dtype=bool)
     fallen = np.zeros(num_envs, dtype=bool)
     start_dist = state.info["ball_dist"].copy()
+    start_ball_pos = state.info["ball_pos"].copy()
+    current_goal_side = state.info.get("goal_side", np.ones(num_envs, dtype=np.float32)).copy()
     current_start_dist = start_dist.copy()
     step_count = 0
     done_count = 0
     completed_progress = []
+    completed_goal_progress = []
+    side_success = {"left": 0, "right": 0}
+    side_done = {"left": 0, "right": 0}
     reward_sum = np.zeros(num_envs, dtype=np.float64)
     forward_vel_sum = np.zeros(num_envs, dtype=np.float64)
     progress_vel_sum = np.zeros(num_envs, dtype=np.float64)
     command_vx_sum = np.zeros(num_envs, dtype=np.float64)
     command_wz_abs_sum = np.zeros(num_envs, dtype=np.float64)
+    ball_goal_vel_sum = np.zeros(num_envs, dtype=np.float64)
 
     for _ in range(max_steps):
+        pre_step_goal_side = current_goal_side.copy()
         with torch.no_grad():
             actions = policy(obs)
 
@@ -96,36 +103,56 @@ def evaluate(env, policy, device, num_envs, max_steps):
         commands = state.info["commands"]
         progress_vel = (state.info["prev_ball_dist"] - state.info["ball_dist"]) / env.cfg.ctrl_dt
         progress_vel = np.clip(progress_vel, -0.5, 0.8)
-
-        arrived = state.info.get(
-            "arrived_done",
-            state.info["ball_dist"] <= env.cfg.ball_config.arrival_radius,
+        target_dir = state.info.get("kick_target_dir", np.tile(np.array([[1.0, 0.0]], dtype=np.float32), (num_envs, 1)))
+        goal_progress = state.info.get(
+            "goal_progress",
+            np.sum((state.info["ball_pos"][:, :2] - start_ball_pos[:, :2]) * target_dir, axis=1),
         )
-        fall_done = state.info.get("fall_done", state.terminated & ~arrived)
+        ball_goal_vel = (
+            np.sum((state.info["ball_pos"][:, :2] - state.info["prev_ball_pos"][:, :2]) * target_dir, axis=1)
+            / env.cfg.ctrl_dt
+        )
+
+        success_done = state.info.get(
+            "kick_success_done",
+            state.info.get("goal_line_success", np.zeros(num_envs, dtype=bool)),
+        )
+        fall_done = state.info.get("fall_done", state.terminated & ~success_done)
         done = state.done.astype(bool)
 
-        reached |= arrived
+        goal_success |= success_done
         fallen |= fall_done
         done_count += int(np.sum(done))
         if np.any(done):
-            arrived_done = done & arrived
-            fall_done_mask = done & ~arrived
-            if np.any(arrived_done):
+            success_done_mask = done & success_done
+            fall_done_mask = done & ~success_done
+            if np.any(success_done_mask):
                 completed_progress.extend(
-                    (current_start_dist[arrived_done] - env.cfg.ball_config.arrival_radius).tolist()
+                    (current_start_dist[success_done_mask] - state.info["ball_dist"][success_done_mask]).tolist()
                 )
+                completed_goal_progress.extend(goal_progress[success_done_mask].tolist())
             if np.any(fall_done_mask):
                 completed_progress.extend(np.zeros(int(np.sum(fall_done_mask)), dtype=np.float32).tolist())
+                completed_goal_progress.extend(goal_progress[fall_done_mask].tolist())
+            left_done = done & (pre_step_goal_side < 0.0)
+            right_done = done & (pre_step_goal_side > 0.0)
+            side_done["left"] += int(np.sum(left_done))
+            side_done["right"] += int(np.sum(right_done))
+            side_success["left"] += int(np.sum(left_done & success_done))
+            side_success["right"] += int(np.sum(right_done & success_done))
             current_start_dist[done] = state.info["ball_dist"][done]
+            start_ball_pos[done] = state.info["ball_pos"][done]
+        current_goal_side = state.info.get("goal_side", current_goal_side).copy()
 
         reward_sum += state.reward
         forward_vel_sum += env.get_local_linvel(state.data)[:, 0]
         progress_vel_sum += progress_vel
         command_vx_sum += commands[:, 0]
         command_wz_abs_sum += np.abs(commands[:, 2])
+        ball_goal_vel_sum += ball_goal_vel
 
         step_count += 1
-        if np.all(reached | fallen):
+        if np.all(goal_success | fallen):
             break
 
         obs = torch.from_numpy(state.obs).to(device)
@@ -137,15 +164,27 @@ def evaluate(env, policy, device, num_envs, max_steps):
         )
     else:
         progress_values = ongoing_progress
+    if completed_goal_progress:
+        goal_progress_values = np.concatenate(
+            [np.asarray(completed_goal_progress, dtype=np.float32), goal_progress.astype(np.float32)]
+        )
+    else:
+        goal_progress_values = goal_progress
 
     return {
-        "reached": int(np.sum(reached)),
-        "fallen": int(np.sum(fallen)),
+        "goal_success_count": int(np.sum(goal_success)),
+        "fall_count": int(np.sum(fallen)),
         "done_count": done_count,
+        "left_goal_success": side_success["left"],
+        "left_goal_done": side_done["left"],
+        "right_goal_success": side_success["right"],
+        "right_goal_done": side_done["right"],
         "total": num_envs,
         "mean_ball_dist": float(np.mean(state.info["ball_dist"])),
         "mean_progress": float(np.mean(progress_values)),
         "mean_start_dist": float(np.mean(start_dist)),
+        "mean_goal_progress": float(np.mean(goal_progress_values)),
+        "mean_ball_goal_vel": float(np.mean(ball_goal_vel_sum / max(step_count, 1))),
         "mean_forward_vel": float(np.mean(forward_vel_sum / max(step_count, 1))),
         "mean_progress_vel": float(np.mean(progress_vel_sum / max(step_count, 1))),
         "mean_command_vx": float(np.mean(command_vx_sum / max(step_count, 1))),
@@ -172,12 +211,20 @@ def main():
         print(f"\n--- {ckpt} ---")
         policy = load_policy(ckpt, device)
         result = evaluate(env, policy, device, args.num_envs, args.max_steps)
-        print(f"  Reached: {result['reached']}/{result['total']}")
-        print(f"  Fallen: {result['fallen']}/{result['total']}  done events: {result['done_count']}")
+        print(f"  Goal success: {result['goal_success_count']}/{result['total']}")
+        print(
+            f"  Left goal success: {result['left_goal_success']}/{result['left_goal_done']}  "
+            f"Right goal success: {result['right_goal_success']}/{result['right_goal_done']}"
+        )
+        print(f"  Fallen: {result['fall_count']}/{result['total']}  done events: {result['done_count']}")
         print(
             f"  Mean final ball dist: {result['mean_ball_dist']:.3f} m  "
             f"progress: {result['mean_progress']:.3f} m  "
             f"start: {result['mean_start_dist']:.3f} m"
+        )
+        print(
+            f"  Mean goal progress: {result['mean_goal_progress']:.4f} m  "
+            f"ball goal vel: {result['mean_ball_goal_vel']:.4f} m/s"
         )
         print(
             f"  Mean fwd vel: {result['mean_forward_vel']:.4f} m/s  "

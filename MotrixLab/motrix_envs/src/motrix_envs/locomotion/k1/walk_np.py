@@ -250,7 +250,7 @@ class K1WalkTask(NpEnv):
         reward_dict = self._get_reward(state.data, state.info)
         rewards = {k: v * self.cfg.reward_config.scales[k] for k, v in reward_dict.items()}
         rwd = sum(rewards.values())
-        rwd = np.clip(rwd, 0.0, 10000.0)
+        rwd = np.clip(rwd, -1000.0, 10000.0)
         rwd = np.where(state.terminated, 0.0, rwd)
         if "termination" in self.cfg.reward_config.scales:
             rwd += self._reward_termination(state.terminated) * self.cfg.reward_config.scales["termination"]
@@ -291,7 +291,6 @@ class K1WalkTask(NpEnv):
             "command_forward_vel": self._reward_command_forward_vel(data, commands),
             "overspeed": self._reward_overspeed(data, commands),
             "straight_motion": self._reward_straight_motion(data, commands),
-            "stand_still": self._reward_stand_still(data, commands),
             "lin_vel_z": self._reward_lin_vel_z(data),
             "ang_vel_xy": self._reward_ang_vel_xy(data),
             "orientation": self._reward_orientation(data),

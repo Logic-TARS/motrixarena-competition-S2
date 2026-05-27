@@ -63,8 +63,12 @@ class AdvancedDribbler:
         self.dribble_dist = 0.20 # Ball should be slightly in front
         self.max_fw_vel = 0.8
         
-        self.field_length = 14.0 # Default M
-        self.field_width = 9.0
+        # Read field dimensions from config (supports S/M/L league)
+        config = agent.get_config()
+        league = config.get("league", "M")
+        field_dims = config.get("field_size", {}).get(league, [14.0, 9.0])
+        self.field_length = float(field_dims[0])
+        self.field_width = float(field_dims[1])
         
         # Anti-Oscillation
         self.spread_factor_max = 20.0 # degrees
@@ -366,7 +370,14 @@ class AdvancedDribbler:
         }
         self.recorder.log(log_data)
         
-        # 3. Final Command
+        # 3. Kick Decision — fire when close to opponent goal and ball is in front
+        if near_goal and b_x_virt > 0.05 and ball_dist < 0.35:
+            self.logger.info(f"[AdvDribble] KICK near goal! dist={ball_dist:.2f} b_x={b_x:.2f}")
+            self.agent.kick(foot=0, death=0)
+            self.agent.move_head(math.inf, math.inf)
+            return
+        
+        # 4. Final Command
         self.logger.info(f"[AdvDribble] Safe:{is_safe_zone} Alg:{aligned} T_Ang:{target_angle_deg:.1f} Cmd:({cmd_x:.2f}, {cmd_y:.2f}, {da:.2f})")
         self.agent.cmd_vel(cmd_x, cmd_y, da)
         self.agent.move_head(math.inf, math.inf)
