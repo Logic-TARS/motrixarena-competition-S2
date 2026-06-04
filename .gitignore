@@ -17,10 +17,7 @@ debug_logs/
 docx/
 examples/
 envs/
-unitree_rl_gym/
-legged_gym/sim_soccer2/
 * (copy).*
-MotrixLab/motrix_envs/src/motrix_envs/locomotion/k1/walk_np_0604.py
 
 # Virtual environments and build outputs
 venv/
