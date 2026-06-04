@@ -228,8 +228,16 @@ class Trainer:
         commands = state.info.get("commands")
         left_contact = state.info.get("left_contact")
         right_contact = state.info.get("right_contact")
+        termination_too_low = state.info.get("termination_too_low")
+        termination_too_tilted = state.info.get("termination_too_tilted")
         feet_pos = state.info.get("feet_pos")
         feet_vel = state.info.get("feet_vel")
+        torque_limit = getattr(env, "torque_limits", None)
+        if torque_limit is None:
+            torque_limit = getattr(env.cfg.control_config, "torque_limit", None)
+        torque_saturation = None
+        if torque_limit is not None and np.all(np.asarray(torque_limit) > 0):
+            torque_saturation = np.mean(np.abs(state.data.actuator_ctrls) >= 0.95 * torque_limit, axis=1)
 
         rewards_np = rewards.detach().cpu().numpy()
         dones_np = dones.detach().cpu().numpy().astype(bool)
@@ -251,6 +259,12 @@ class Trainer:
                 parts.append(f"cmd={self._fmt_vec(commands[idx])}")
             if left_contact is not None and right_contact is not None:
                 parts.append(f"contact=({int(left_contact[idx])},{int(right_contact[idx])})")
+            if termination_too_low is not None or termination_too_tilted is not None:
+                too_low = int(termination_too_low[idx]) if termination_too_low is not None else 0
+                too_tilted = int(termination_too_tilted[idx]) if termination_too_tilted is not None else 0
+                parts.append(f"term=(low:{too_low},tilt:{too_tilted})")
+            if torque_saturation is not None:
+                parts.append(f"torque_sat={float(torque_saturation[idx]):.3f}")
             if feet_pos is not None:
                 parts.append(f"feet_pos={self._fmt_vec(feet_pos[idx].reshape(-1))}")
             if feet_vel is not None:

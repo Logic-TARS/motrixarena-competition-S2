@@ -53,13 +53,43 @@ class ControlConfig:
             "Right_Ankle_Roll": 2.0,
         }
     )
-    action_scale: float = 0.25
-    torque_limit: float = 40.0
+    action_scale: dict[str, float] = field(
+        default_factory=lambda: {
+            "Left_Hip_Pitch": 0.1700,
+            "Right_Hip_Pitch": 0.1700,
+            "Left_Hip_Roll": 0.1900,
+            "Right_Hip_Roll": 0.1900,
+            "Left_Hip_Yaw": 0.09575,
+            "Right_Hip_Yaw": 0.09575,
+            "Left_Knee_Pitch": 0.1867,
+            "Right_Knee_Pitch": 0.1867,
+            "Left_Ankle_Pitch": 0.2394,
+            "Right_Ankle_Pitch": 0.2394,
+            "Left_Ankle_Roll": 0.2394,
+            "Right_Ankle_Roll": 0.2394,
+        }
+    )
+    torque_limit: dict[str, float] = field(
+        default_factory=lambda: {
+            "Left_Hip_Pitch": 68.0,
+            "Right_Hip_Pitch": 68.0,
+            "Left_Hip_Roll": 76.0,
+            "Right_Hip_Roll": 76.0,
+            "Left_Hip_Yaw": 38.3,
+            "Right_Hip_Yaw": 38.3,
+            "Left_Knee_Pitch": 112.0,
+            "Right_Knee_Pitch": 112.0,
+            "Left_Ankle_Pitch": 38.3,
+            "Right_Ankle_Pitch": 38.3,
+            "Left_Ankle_Roll": 38.3,
+            "Right_Ankle_Roll": 38.3,
+        }
+    )
 
 
 @dataclass
 class InitState:
-    pos = [0.0, 0.0, 0.72]
+    pos = [0.0, 0.0, 0.57]
     default_joint_angles = {
         "Left_Hip_Pitch": -0.2,
         "Right_Hip_Pitch": -0.2,
@@ -121,6 +151,7 @@ class Asset:
     foot_name: str = "Foot"
     ground_name: str = "ground"
     penalize_contacts_on: list = field(default_factory=lambda: ["Trunk", "Shank"])
+    ground_geom_indices: list[int] = field(default_factory=lambda: [0])
     left_foot_geom_indices: list[int] = field(default_factory=lambda: [33])
     right_foot_geom_indices: list[int] = field(default_factory=lambda: [44])
     collision_geom_indices: list[int] = field(default_factory=lambda: [2, 3, 29, 30, 40, 41])
@@ -158,6 +189,7 @@ class RewardConfig:
         }
     )
     only_positive_rewards: bool = True
+    trust_contact_rewards: bool = True
     tracking_sigma: float = 0.25
     min_base_height: float = 0.45
     swing_height: float = 0.08

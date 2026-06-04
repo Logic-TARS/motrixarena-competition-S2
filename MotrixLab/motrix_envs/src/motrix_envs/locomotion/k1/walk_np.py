@@ -90,6 +90,8 @@ class K1WalkTask(NpEnv):
         self.default_angles = np.zeros(self._num_action, dtype=np.float32)
         self.kps = np.zeros(self._num_action, dtype=np.float32)
         self.kds = np.zeros(self._num_action, dtype=np.float32)
+        self.action_scale = np.zeros(self._num_action, dtype=np.float32)
+        self.torque_limits = np.zeros(self._num_action, dtype=np.float32)
         for i, name in enumerate(self._model.actuator_names):
             self.default_angles[i] = cfg.init_state.default_joint_angles.get(
                 name,
@@ -97,6 +99,8 @@ class K1WalkTask(NpEnv):
             )
             self.kps[i] = cfg.control_config.stiffness[name]
             self.kds[i] = cfg.control_config.damping[name]
+            self.action_scale[i] = self._resolve_actuator_value(cfg.control_config.action_scale, name, "action_scale")
+            self.torque_limits[i] = self._resolve_actuator_value(cfg.control_config.torque_limit, name, "torque_limit")
 
         self._init_dof_pos[:3] = np.asarray(cfg.init_state.pos, dtype=np.float32)
         self._init_dof_pos[self._joint_dof_pos_indices] = self.default_angles
@@ -112,30 +116,37 @@ class K1WalkTask(NpEnv):
         self._hip_indices = self._find_hip_indices()
 
         # Build foot contact pairs (foot geoms <-> ground), separated by left/right.
-        ground_geoms = []
-        left_foot_geoms = []
-        right_foot_geoms = []
-        collision_geoms = []
+        # K1 geoms are often unnamed after MotrixSim loading, so explicit cfg indices are the training source of truth.
+        name_matched_ground_geoms = []
+        name_matched_left_foot_geoms = []
+        name_matched_right_foot_geoms = []
+        name_matched_collision_geoms = []
         for geom_name in self._model.geom_names:
             if geom_name is None:
                 continue
             if cfg.asset.ground_name in geom_name:
-                ground_geoms.append(self._model.get_geom_index(geom_name))
+                name_matched_ground_geoms.append(self._model.get_geom_index(geom_name))
             elif "Left" in geom_name and cfg.asset.foot_name in geom_name:
-                left_foot_geoms.append(self._model.get_geom_index(geom_name))
+                name_matched_left_foot_geoms.append(self._model.get_geom_index(geom_name))
             elif "Right" in geom_name and cfg.asset.foot_name in geom_name:
-                right_foot_geoms.append(self._model.get_geom_index(geom_name))
+                name_matched_right_foot_geoms.append(self._model.get_geom_index(geom_name))
             elif any(part in geom_name for part in cfg.asset.penalize_contacts_on):
-                collision_geoms.append(self._model.get_geom_index(geom_name))
+                name_matched_collision_geoms.append(self._model.get_geom_index(geom_name))
 
-        if not ground_geoms:
-            ground_geoms = [0]
-        if not left_foot_geoms:
-            left_foot_geoms = list(cfg.asset.left_foot_geom_indices)
-        if not right_foot_geoms:
-            right_foot_geoms = list(cfg.asset.right_foot_geom_indices)
-        if not collision_geoms:
-            collision_geoms = list(cfg.asset.collision_geom_indices)
+        ground_geoms = self._validate_geom_indices("ground", cfg.asset.ground_geom_indices)
+        left_foot_geoms = self._validate_geom_indices("left foot", cfg.asset.left_foot_geom_indices)
+        right_foot_geoms = self._validate_geom_indices("right foot", cfg.asset.right_foot_geom_indices)
+        collision_geoms = self._validate_geom_indices("collision", cfg.asset.collision_geom_indices, allow_empty=True)
+        self.contact_geom_diagnostics = {
+            "name_matched_ground_geoms": name_matched_ground_geoms,
+            "name_matched_left_foot_geoms": name_matched_left_foot_geoms,
+            "name_matched_right_foot_geoms": name_matched_right_foot_geoms,
+            "name_matched_collision_geoms": name_matched_collision_geoms,
+            "ground_geoms": ground_geoms,
+            "left_foot_geoms": left_foot_geoms,
+            "right_foot_geoms": right_foot_geoms,
+            "collision_geoms": collision_geoms,
+        }
 
         self._left_foot_geoms = [self._model.get_geom(idx) for idx in left_foot_geoms]
         self._right_foot_geoms = [self._model.get_geom(idx) for idx in right_foot_geoms]
@@ -159,6 +170,26 @@ class K1WalkTask(NpEnv):
             [[c, g] for c in collision_geoms for g in ground_geoms], dtype=np.uint32
         ).reshape((-1, 2))
         self.collision_check_num = self.collision_contact_pairs.shape[0] if self.collision_contact_pairs.size > 0 else 0
+
+    def _validate_geom_indices(self, label: str, indices: list[int], allow_empty: bool = False) -> list[int]:
+        if not indices:
+            if allow_empty:
+                return []
+            raise ValueError(f"K1 {label} geom indices are empty; explicit contact cfg is required.")
+        num_geoms = len(self._model.geom_names)
+        resolved = []
+        for idx in indices:
+            if idx < 0 or idx >= num_geoms:
+                raise ValueError(f"K1 {label} geom index {idx} is out of range [0, {num_geoms}).")
+            resolved.append(int(idx))
+        return resolved
+
+    def _resolve_actuator_value(self, values, actuator_name: str, label: str) -> float:
+        if isinstance(values, dict):
+            if actuator_name not in values:
+                raise KeyError(f"K1 {label} is missing actuator '{actuator_name}'.")
+            return float(values[actuator_name])
+        return float(values)
 
     def _make_soft_dof_pos_limits(self) -> tuple[np.ndarray, np.ndarray]:
         limit_center = 0.5 * (self.dof_pos_lower + self.dof_pos_upper)
@@ -218,9 +249,9 @@ class K1WalkTask(NpEnv):
         state.data.set_dof_vel(dof_vel)
 
     def _compute_torques(self, actions, data):
-        target_pos = actions * self.cfg.control_config.action_scale + self.default_angles
+        target_pos = actions * self.action_scale + self.default_angles
         torques = self.kps * (target_pos - self.get_dof_pos(data)) - self.kds * self.get_dof_vel(data)
-        return np.clip(torques, -self.cfg.control_config.torque_limit, self.cfg.control_config.torque_limit)
+        return np.clip(torques, -self.torque_limits, self.torque_limits)
 
     def get_local_linvel(self, data: mtx.SceneData) -> np.ndarray:
         return self._model.get_sensor_value(self.cfg.sensor.local_linvel, data)
@@ -295,6 +326,8 @@ class K1WalkTask(NpEnv):
         gravity = quaternion.rotate_inverse(base_quat, self.gravity_vec)
         too_low = pose[:, 2] < self.cfg.reward_config.min_base_height
         too_tilted = np.linalg.norm(gravity[:, :2], axis=1) > self.cfg.reward_config.max_tilt_xy
+        state.info["termination_too_low"] = too_low.astype(np.float32)
+        state.info["termination_too_tilted"] = too_tilted.astype(np.float32)
         return state.replace(terminated=too_low | too_tilted)
 
     def resample_commands(self, num_envs: int):
@@ -498,12 +531,16 @@ class K1WalkTask(NpEnv):
         return np.stack([left, right], axis=1)
 
     def _reward_contact(self, info: dict):
+        if not self.cfg.reward_config.trust_contact_rewards:
+            return np.zeros((self._num_envs,), dtype=np.float32)
         contacts = self._foot_contact_matrix(info)
         phase = info["gait_phase"]
         stance = np.stack([phase < 0.55, np.fmod(phase + 0.5, 1.0) < 0.55], axis=1)
         return np.sum(~np.logical_xor(contacts, stance), axis=1).astype(np.float32)
 
     def _reward_feet_swing_height(self, info: dict):
+        if not self.cfg.reward_config.trust_contact_rewards:
+            return np.zeros((self._num_envs,), dtype=np.float32)
         contacts = self._foot_contact_matrix(info)
         feet_pos = info.get("feet_pos")
         if feet_pos is None:
@@ -512,6 +549,8 @@ class K1WalkTask(NpEnv):
         return np.sum(pos_error, axis=1).astype(np.float32)
 
     def _reward_contact_no_vel(self, info: dict):
+        if not self.cfg.reward_config.trust_contact_rewards:
+            return np.zeros((self._num_envs,), dtype=np.float32)
         contacts = self._foot_contact_matrix(info)
         feet_vel = info.get("feet_vel")
         if feet_vel is None:
