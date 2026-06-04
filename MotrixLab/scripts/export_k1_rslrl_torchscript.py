@@ -41,7 +41,7 @@ class TensorPolicyWrapper(torch.nn.Module):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Export an RSLRL K1 checkpoint to a 52->12 TorchScript policy."
+        description="Export an RSLRL K1 checkpoint to a 47->12 TorchScript policy."
     )
     parser.add_argument("checkpoint", type=Path, help="RSLRL checkpoint, for example runs/.../model_199.pt")
     parser.add_argument(
@@ -75,8 +75,8 @@ def main() -> None:
 
     if tuple(output.shape) != (1, vec_env.num_actions):
         raise RuntimeError(f"Unexpected exported policy shape {tuple(output.shape)}")
-    if vec_env.num_obs != 52 or vec_env.num_actions != 12:
-        raise RuntimeError(f"K1 runtime expects 52->12, got {vec_env.num_obs}->{vec_env.num_actions}")
+    if vec_env.num_obs != 47 or vec_env.num_actions != 12:
+        raise RuntimeError(f"K1 G1-style runtime expects 47->12, got {vec_env.num_obs}->{vec_env.num_actions}")
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     traced.save(str(args.output))

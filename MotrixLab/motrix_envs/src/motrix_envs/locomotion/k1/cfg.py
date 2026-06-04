@@ -23,37 +23,37 @@ from motrix_envs.base import EnvCfg
 class ControlConfig:
     stiffness: dict[str, float] = field(
         default_factory=lambda: {
-            "Left_Hip_Pitch": 200.0,
-            "Right_Hip_Pitch": 200.0,
-            "Left_Hip_Roll": 200.0,
-            "Right_Hip_Roll": 200.0,
-            "Left_Hip_Yaw": 200.0,
-            "Right_Hip_Yaw": 200.0,
-            "Left_Knee_Pitch": 200.0,
-            "Right_Knee_Pitch": 200.0,
-            "Left_Ankle_Pitch": 50.0,
-            "Right_Ankle_Pitch": 50.0,
-            "Left_Ankle_Roll": 50.0,
-            "Right_Ankle_Roll": 50.0,
+            "Left_Hip_Pitch": 100.0,
+            "Right_Hip_Pitch": 100.0,
+            "Left_Hip_Roll": 100.0,
+            "Right_Hip_Roll": 100.0,
+            "Left_Hip_Yaw": 100.0,
+            "Right_Hip_Yaw": 100.0,
+            "Left_Knee_Pitch": 150.0,
+            "Right_Knee_Pitch": 150.0,
+            "Left_Ankle_Pitch": 40.0,
+            "Right_Ankle_Pitch": 40.0,
+            "Left_Ankle_Roll": 40.0,
+            "Right_Ankle_Roll": 40.0,
         }
     )
     damping: dict[str, float] = field(
         default_factory=lambda: {
-            "Left_Hip_Pitch": 5.0,
-            "Right_Hip_Pitch": 5.0,
-            "Left_Hip_Roll": 5.0,
-            "Right_Hip_Roll": 5.0,
-            "Left_Hip_Yaw": 5.0,
-            "Right_Hip_Yaw": 5.0,
-            "Left_Knee_Pitch": 5.0,
-            "Right_Knee_Pitch": 5.0,
-            "Left_Ankle_Pitch": 1.0,
-            "Right_Ankle_Pitch": 1.0,
-            "Left_Ankle_Roll": 1.0,
-            "Right_Ankle_Roll": 1.0,
+            "Left_Hip_Pitch": 2.0,
+            "Right_Hip_Pitch": 2.0,
+            "Left_Hip_Roll": 2.0,
+            "Right_Hip_Roll": 2.0,
+            "Left_Hip_Yaw": 2.0,
+            "Right_Hip_Yaw": 2.0,
+            "Left_Knee_Pitch": 4.0,
+            "Right_Knee_Pitch": 4.0,
+            "Left_Ankle_Pitch": 2.0,
+            "Right_Ankle_Pitch": 2.0,
+            "Left_Ankle_Roll": 2.0,
+            "Right_Ankle_Roll": 2.0,
         }
     )
-    action_scale: float = 0.35
+    action_scale: float = 0.25
     torque_limit: float = 40.0
 
 
@@ -77,14 +77,20 @@ class Commands:
         [0.35, 0.0, 0.0],
         [0.55, 0.0, 0.0],
     ]
+    lin_vel_x = [-1.0, 1.0]
+    lin_vel_y = [-1.0, 1.0]
+    ang_vel_yaw = [-1.0, 1.0]
+    resampling_time: float = 10.0
+    command_deadzone: float = 0.2
+    phase_period: float = 0.8
 
 
 @dataclass
 class Normalization:
-    lin_vel = 1.0
-    ang_vel = 1.0
+    lin_vel = 2.0
+    ang_vel = 0.25
     dof_pos = 1.0
-    dof_vel = 0.1
+    dof_vel = 0.05
 
 
 @dataclass
@@ -108,31 +114,34 @@ class Sensor:
 class RewardConfig:
     scales: dict[str, float] = field(
         default_factory=lambda: {
-            "termination": -100.0,
-            "alive": 0.05,
-            "tracking_lin_vel": 1.5,
-            "tracking_ang_vel": 0.25,
-            "command_forward_vel": 0.3,
-            "overspeed": -8.0,
-            "straight_motion": -2.0,
+            "termination": -0.0,
+            "tracking_lin_vel": 1.0,
+            "tracking_ang_vel": 0.5,
             "lin_vel_z": -2.0,
             "ang_vel_xy": -0.05,
-            "orientation": -3.0,
-            "base_height": -2.0,
-            "torques": -0.0002,
-            "dof_vel": -0.003,
-            "dof_acc": -2.5e-6,
-            "action_rate": -0.02,
-            "joint_regularization": -0.2,
-            "feet_air_time": 1.0,
-            "collision": -1.0,
+            "orientation": -1.0,
+            "base_height": -10.0,
+            "torques": -1.0e-5,
+            "dof_vel": -1.0e-3,
+            "dof_acc": -2.5e-7,
+            "feet_air_time": 0.0,
+            "collision": 0.0,
+            "action_rate": -0.01,
+            "dof_pos_limits": -5.0,
+            "alive": 0.15,
+            "hip_pos": -1.0,
+            "contact_no_vel": -0.2,
+            "feet_swing_height": -20.0,
+            "contact": 0.18,
         }
     )
-    tracking_sigma: float = 0.08
+    only_positive_rewards: bool = True
+    tracking_sigma: float = 0.25
     min_base_height: float = 0.45
-    max_foot_height: float = 0.15
+    swing_height: float = 0.08
     target_base_height: float = 0.68
     max_tilt_xy: float = 0.55
+    soft_dof_pos_limit: float = 0.9
     forward_vel_margin: float = 0.15
     forward_reward_min_height: float = 0.45
     forward_reward_full_height: float = 0.56

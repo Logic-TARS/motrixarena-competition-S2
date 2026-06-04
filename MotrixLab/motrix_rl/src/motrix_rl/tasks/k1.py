@@ -30,8 +30,8 @@ class skrl:
             runner.models.value.hiddens = [256, 128, 64]
             runner.agent.rollouts = 24
             runner.agent.learning_epochs = 5
-            runner.agent.mini_batches = 3
-            runner.agent.learning_rate = 3e-4
+            runner.agent.mini_batches = 4
+            runner.agent.learning_rate = 1e-3
             runner.trainer.timesteps = 30000
 
 
@@ -43,21 +43,21 @@ class rslrl:
             runner = self.runner
             algo = runner.algorithm
 
-            self.num_envs = 256
-            runner.seed = 42
-            runner.max_iterations = 1500
+            self.num_envs = 4096
+            runner.seed = 1
+            runner.max_iterations = 10000
             runner.num_steps_per_env = 24
-            runner.save_interval = 25
-            runner.experiment_name = "k1_flat_terrain_walk"
-            runner.actor.hidden_dims = [256, 128, 64]
-            runner.critic.hidden_dims = [256, 128, 64]
-            runner.actor.init_noise_std = 0.5
+            runner.save_interval = 50
+            runner.experiment_name = "k1_g1_style_walk"
+            runner.actor.hidden_dims = [32]
+            runner.critic.hidden_dims = [32]
+            runner.actor.init_noise_std = 0.8
 
-            algo.learning_rate = 3e-4
+            algo.learning_rate = 1e-3
             algo.num_learning_epochs = 5
-            algo.num_mini_batches = 3
-            algo.entropy_coef = 0.001
-            algo.desired_kl = 0.008
+            algo.num_mini_batches = 4
+            algo.entropy_coef = 0.01
+            algo.desired_kl = 0.01
 
     @rlcfg("k1-ball-navigate")
     @dataclass

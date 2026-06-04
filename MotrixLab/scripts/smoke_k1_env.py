@@ -46,8 +46,8 @@ def main() -> None:
 
     obs_dim = env.observation_space.shape[0]
     act_dim = env.action_space.shape[0]
-    if obs_dim != 52 or act_dim != 12:
-        raise AssertionError(f"K1 runtime expects 52->12, got {obs_dim}->{act_dim}")
+    if obs_dim != 47 or act_dim != 12:
+        raise AssertionError(f"K1 G1-style runtime expects 47->12, got {obs_dim}->{act_dim}")
 
     if state.obs.shape != (args.num_envs, obs_dim):
         raise AssertionError(f"Unexpected reset obs shape {state.obs.shape}")

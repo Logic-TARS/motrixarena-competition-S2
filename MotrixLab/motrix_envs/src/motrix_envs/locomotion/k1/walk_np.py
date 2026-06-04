@@ -41,26 +41,14 @@ class K1WalkTask(NpEnv):
 
     def _init_obs_space(self):
         num_gravity = 3
-        num_local_linvel = 3
         num_gyro = 3
         num_actions = self._model.num_actuators
         num_dof_vel = num_actions
         num_joint_angle = num_actions
         num_command = 3
         num_gait_phase = 2
-        num_foot_contact = 2
-        num_obs = (
-            num_gravity
-            + num_local_linvel
-            + num_gyro
-            + num_command
-            + num_gait_phase
-            + num_joint_angle
-            + num_dof_vel
-            + num_actions
-            + num_foot_contact
-        )
-        assert num_obs == 52
+        num_obs = num_gyro + num_gravity + num_command + num_joint_angle + num_dof_vel + num_actions + num_gait_phase
+        assert num_obs == 47
         self._observation_space = gym.spaces.Box(-np.inf, np.inf, (num_obs,), dtype=np.float32)
 
     def _init_action_space(self):
@@ -83,9 +71,8 @@ class K1WalkTask(NpEnv):
     def _get_actuated_dof_pos_indices(self) -> np.ndarray:
         indices = np.asarray(self._body.get_dof_pos_indices(), dtype=np.int64).reshape(-1)
         if indices.size < self._num_action:
-            # K1 has a floating base followed by 12 actuated joints in the train assets.
             return np.arange(7, 7 + self._num_action, dtype=np.int64)
-        return indices[-self._num_action :]
+        return indices[-self._num_action:]
 
     def _init_buffer(self):
         cfg = self._cfg
@@ -113,9 +100,17 @@ class K1WalkTask(NpEnv):
         self._init_dof_pos[:3] = np.asarray(cfg.init_state.pos, dtype=np.float32)
         self._init_dof_pos[self._joint_dof_pos_indices] = self.default_angles
 
+        joint_limits = np.asarray(self._model.joint_limits, dtype=np.float32)
+        if joint_limits.shape == (2, self._num_action):
+            self.dof_pos_lower = joint_limits[0].copy()
+            self.dof_pos_upper = joint_limits[1].copy()
+        else:
+            self.dof_pos_lower = np.full(self._num_action, -1.5, dtype=np.float32)
+            self.dof_pos_upper = np.full(self._num_action, 1.5, dtype=np.float32)
+        self._soft_dof_pos_lower, self._soft_dof_pos_upper = self._make_soft_dof_pos_limits()
+        self._hip_indices = self._find_hip_indices()
+
         # Build foot contact pairs (foot geoms <-> ground), separated by left/right.
-        # The current K1 MJCF leaves most geom names empty in MotrixSim, so cfg index
-        # fallbacks keep feet_air_time/collision active for this asset.
         ground_geoms = []
         left_foot_geoms = []
         right_foot_geoms = []
@@ -141,6 +136,9 @@ class K1WalkTask(NpEnv):
         if not collision_geoms:
             collision_geoms = list(cfg.asset.collision_geom_indices)
 
+        self._left_foot_geoms = [self._model.get_geom(idx) for idx in left_foot_geoms]
+        self._right_foot_geoms = [self._model.get_geom(idx) for idx in right_foot_geoms]
+
         # Foot contact pairs for feet_air_time reward (all feet)
         foot_geoms = left_foot_geoms + right_foot_geoms
         self.foot_contact_pairs = np.array(
@@ -161,17 +159,45 @@ class K1WalkTask(NpEnv):
         ).reshape((-1, 2))
         self.collision_check_num = self.collision_contact_pairs.shape[0] if self.collision_contact_pairs.size > 0 else 0
 
+    def _make_soft_dof_pos_limits(self) -> tuple[np.ndarray, np.ndarray]:
+        limit_center = 0.5 * (self.dof_pos_lower + self.dof_pos_upper)
+        limit_range = self.dof_pos_upper - self.dof_pos_lower
+        soft_limit = self.cfg.reward_config.soft_dof_pos_limit
+        lower = limit_center - 0.5 * limit_range * soft_limit
+        upper = limit_center + 0.5 * limit_range * soft_limit
+        return lower.astype(np.float32), upper.astype(np.float32)
+
+    def _find_hip_indices(self) -> np.ndarray:
+        hip_names = ("Hip_Roll", "Hip_Yaw")
+        indices = []
+        for i, name in enumerate(self._model.actuator_names):
+            if any(hip_name in name for hip_name in hip_names):
+                indices.append(i)
+        return np.array(indices, dtype=np.int64) if indices else np.array([], dtype=np.int64)
+
     def apply_action(self, actions, state):
+        if actions.ndim == 1:
+            actions = np.tile(actions, (self._num_envs, 1))
         actions = np.clip(actions, self._action_space.low, self._action_space.high).astype(np.float32)
         state.info["last_dof_vel"] = self.get_dof_vel(state.data)
         state.info["last_actions"] = state.info["current_actions"]
         state.info["current_actions"] = actions
+        state.info["episode_length"] = state.info.get(
+            "episode_length", np.zeros((self._num_envs,), dtype=np.int32)
+        ) + 1
         state.info["gait_phase"] = np.fmod(
-            state.info["gait_phase"] + self.cfg.ctrl_dt * self.cfg.reward_config.gait_frequency,
+            state.info["episode_length"] * self.cfg.ctrl_dt / self.cfg.commands.phase_period,
             1.0,
         ).astype(np.float32)
+        self._maybe_resample_commands(state.info)
         state.data.actuator_ctrls = self._compute_torques(actions, state.data)
         return state
+
+    def _maybe_resample_commands(self, info: dict) -> None:
+        resampling_steps = max(int(self.cfg.commands.resampling_time / self.cfg.ctrl_dt), 1)
+        resample_mask = (info["episode_length"] % resampling_steps) == 0
+        if np.any(resample_mask):
+            info["commands"][resample_mask] = self.resample_commands(int(np.sum(resample_mask)))
 
     def _compute_torques(self, actions, data):
         target_pos = actions * self.cfg.control_config.action_scale + self.default_angles
@@ -192,26 +218,21 @@ class K1WalkTask(NpEnv):
 
     def _get_obs(self, data: mtx.SceneData, info: dict) -> np.ndarray:
         gyro = self.get_gyro(data)
-        linvel = self.get_local_linvel(data)
         pose = self._body.get_pose(data)
         base_quat = pose[:, 3:7]
         local_gravity = quaternion.rotate_inverse(base_quat, self.gravity_vec)
         diff = self.get_dof_pos(data) - self.default_angles
         gait = info["gait_phase"]
-        gait_mask = float(self.cfg.reward_config.gait_frequency > 1.0e-8)
 
         obs = np.zeros((data.shape[0], self._num_observation), dtype=np.float32)
-        obs[:, 0:3] = local_gravity
-        obs[:, 3:6] = linvel * self.cfg.normalization.lin_vel
-        obs[:, 6:9] = gyro * self.cfg.normalization.ang_vel
-        obs[:, 9:12] = info["commands"] * self.commands_scale
-        obs[:, 12] = np.cos(2 * np.pi * gait) * gait_mask
-        obs[:, 13] = np.sin(2 * np.pi * gait) * gait_mask
-        obs[:, 14:26] = diff * self.cfg.normalization.dof_pos
-        obs[:, 26:38] = self.get_dof_vel(data) * self.cfg.normalization.dof_vel
-        obs[:, 38:50] = info["current_actions"]
-        obs[:, 50] = info.get("left_contact", np.zeros(data.shape[0], dtype=np.float32))
-        obs[:, 51] = info.get("right_contact", np.zeros(data.shape[0], dtype=np.float32))
+        obs[:, 0:3] = gyro * self.cfg.normalization.ang_vel
+        obs[:, 3:6] = local_gravity
+        obs[:, 6:9] = info["commands"] * self.commands_scale
+        obs[:, 9:21] = diff * self.cfg.normalization.dof_pos
+        obs[:, 21:33] = self.get_dof_vel(data) * self.cfg.normalization.dof_vel
+        obs[:, 33:45] = info["current_actions"]
+        obs[:, 45] = np.sin(2 * np.pi * gait)
+        obs[:, 46] = np.cos(2 * np.pi * gait)
         return obs
 
     def update_observation(self, state: NpEnvState):
@@ -227,6 +248,8 @@ class K1WalkTask(NpEnv):
             if self.right_foot_pairs.size > 0:
                 right_contact = cquery.is_colliding(self.right_foot_pairs)
                 state.info["right_contact"] = right_contact.any(axis=1).astype(np.float32)
+        state.info["feet_pos"] = self._get_foot_positions(state.data)
+        state.info["feet_vel"] = self._get_foot_velocities(state.data)
         state = state.replace(obs=self._get_obs(state.data, state.info))
         return state
 
@@ -239,21 +262,28 @@ class K1WalkTask(NpEnv):
         return state.replace(terminated=too_low | too_tilted)
 
     def resample_commands(self, num_envs: int):
-        commands = np.random.uniform(
-            low=self.cfg.commands.vel_limit[0],
-            high=self.cfg.commands.vel_limit[1],
-            size=(num_envs, 3),
-        )
+        commands = np.zeros((num_envs, 3), dtype=np.float32)
+        commands[:, 0] = np.random.uniform(*self.cfg.commands.lin_vel_x, size=num_envs)
+        commands[:, 1] = np.random.uniform(*self.cfg.commands.lin_vel_y, size=num_envs)
+        commands[:, 2] = np.random.uniform(*self.cfg.commands.ang_vel_yaw, size=num_envs)
+        moving = np.linalg.norm(commands[:, :2], axis=1) > self.cfg.commands.command_deadzone
+        commands[:, :2] *= moving[:, None]
         return commands.astype(np.float32)
 
     def update_reward(self, state: NpEnvState) -> NpEnvState:
         reward_dict = self._get_reward(state.data, state.info)
-        rewards = {k: v * self.cfg.reward_config.scales[k] for k, v in reward_dict.items()}
+        scales = self.cfg.reward_config.scales
+        rewards = {k: v * scales[k] * self.cfg.ctrl_dt for k, v in reward_dict.items() if k in scales}
         rwd = sum(rewards.values())
-        rwd = np.clip(rwd, -1000.0, 10000.0)
-        rwd = np.where(state.terminated, 0.0, rwd)
-        if "termination" in self.cfg.reward_config.scales:
-            rwd += self._reward_termination(state.terminated) * self.cfg.reward_config.scales["termination"]
+        if self.cfg.reward_config.only_positive_rewards:
+            rwd = np.clip(rwd, 0.0, None)
+        else:
+            rwd = np.clip(rwd, -1000.0, 10000.0)
+        if state.terminated is not None:
+            rwd = np.where(state.terminated, 0.0, rwd)
+        if "termination" in scales:
+            done = state.terminated if state.terminated is not None else np.zeros(state.data.shape[0], dtype=bool)
+            rwd += self._reward_termination(done) * scales["termination"] * self.cfg.ctrl_dt
         return state.replace(reward=rwd)
 
     def reset(self, data) -> tuple[np.ndarray, dict]:
@@ -275,10 +305,13 @@ class K1WalkTask(NpEnv):
             "commands": self.resample_commands(num_reset),
             "last_dof_vel": np.zeros((num_reset, self._num_action), dtype=np.float32),
             "gait_phase": np.zeros((num_reset,), dtype=np.float32),
+            "episode_length": np.zeros((num_reset,), dtype=np.int32),
             "feet_air_time": np.zeros((num_reset, self.foot_check_num), dtype=np.float32),
             "contacts": np.zeros((num_reset, self.foot_check_num), dtype=bool),
             "left_contact": np.zeros((num_reset,), dtype=np.float32),
             "right_contact": np.zeros((num_reset,), dtype=np.float32),
+            "feet_pos": self._get_foot_positions(data),
+            "feet_vel": self._get_foot_velocities(data),
         }
         return self._get_obs(data, info), info
 
@@ -288,9 +321,6 @@ class K1WalkTask(NpEnv):
             "alive": self._reward_alive(data),
             "tracking_lin_vel": self._reward_tracking_lin_vel(data, commands),
             "tracking_ang_vel": self._reward_tracking_ang_vel(data, commands),
-            "command_forward_vel": self._reward_command_forward_vel(data, commands),
-            "overspeed": self._reward_overspeed(data, commands),
-            "straight_motion": self._reward_straight_motion(data, commands),
             "lin_vel_z": self._reward_lin_vel_z(data),
             "ang_vel_xy": self._reward_ang_vel_xy(data),
             "orientation": self._reward_orientation(data),
@@ -299,7 +329,11 @@ class K1WalkTask(NpEnv):
             "dof_vel": self._reward_dof_vel(data),
             "dof_acc": self._reward_dof_acc(data, info),
             "action_rate": self._reward_action_rate(info),
-            "joint_regularization": self._reward_joint_regularization(data),
+            "dof_pos_limits": self._reward_dof_pos_limits(data),
+            "hip_pos": self._reward_hip_pos(data),
+            "contact_no_vel": self._reward_contact_no_vel(info),
+            "feet_swing_height": self._reward_feet_swing_height(info),
+            "contact": self._reward_contact(info),
         }
         if self.foot_check_num > 0:
             result["feet_air_time"] = self._reward_feet_air_time(commands, info)
@@ -341,18 +375,14 @@ class K1WalkTask(NpEnv):
         return np.sum(np.square(action_diff), axis=1)
 
     def _reward_termination(self, done):
-        return done
+        return done.astype(np.float32)
 
     def _reward_alive(self, data):
         return np.ones((data.shape[0],), dtype=np.float32)
 
     def _reward_tracking_lin_vel(self, data, commands: np.ndarray):
         lin_vel_error = np.sum(np.square(commands[:, :2] - self.get_local_linvel(data)[:, :2]), axis=1)
-        return (
-            np.exp(-lin_vel_error / self.cfg.reward_config.tracking_sigma)
-            * self._reward_forward_posture_gate(data)
-            * self._reward_forward_straight_gate(data, commands)
-        )
+        return np.exp(-lin_vel_error / self.cfg.reward_config.tracking_sigma)
 
     def _reward_tracking_ang_vel(self, data, commands: np.ndarray):
         ang_vel_error = np.square(commands[:, 2] - self.get_gyro(data)[:, 2])
@@ -415,6 +445,44 @@ class K1WalkTask(NpEnv):
     def _reward_joint_regularization(self, data):
         return np.sum(np.square(self.get_dof_pos(data) - self.default_angles), axis=1)
 
+    def _reward_dof_pos_limits(self, data):
+        dof_pos = self.get_dof_pos(data)
+        lower_violation = np.clip(self._soft_dof_pos_lower - dof_pos, 0.0, None)
+        upper_violation = np.clip(dof_pos - self._soft_dof_pos_upper, 0.0, None)
+        return np.sum(lower_violation + upper_violation, axis=1)
+
+    def _reward_hip_pos(self, data):
+        if self._hip_indices.size == 0:
+            return np.zeros((data.shape[0],), dtype=np.float32)
+        return np.sum(np.square(self.get_dof_pos(data)[:, self._hip_indices]), axis=1)
+
+    def _foot_contact_matrix(self, info: dict) -> np.ndarray:
+        left = info.get("left_contact", np.zeros((self._num_envs,), dtype=np.float32)).astype(bool)
+        right = info.get("right_contact", np.zeros((self._num_envs,), dtype=np.float32)).astype(bool)
+        return np.stack([left, right], axis=1)
+
+    def _reward_contact(self, info: dict):
+        contacts = self._foot_contact_matrix(info)
+        phase = info["gait_phase"]
+        stance = np.stack([phase < 0.55, np.fmod(phase + 0.5, 1.0) < 0.55], axis=1)
+        return np.sum(~np.logical_xor(contacts, stance), axis=1).astype(np.float32)
+
+    def _reward_feet_swing_height(self, info: dict):
+        contacts = self._foot_contact_matrix(info)
+        feet_pos = info.get("feet_pos")
+        if feet_pos is None:
+            return np.zeros((contacts.shape[0],), dtype=np.float32)
+        pos_error = np.square(feet_pos[:, :, 2] - self.cfg.reward_config.swing_height) * ~contacts
+        return np.sum(pos_error, axis=1).astype(np.float32)
+
+    def _reward_contact_no_vel(self, info: dict):
+        contacts = self._foot_contact_matrix(info)
+        feet_vel = info.get("feet_vel")
+        if feet_vel is None:
+            return np.zeros((contacts.shape[0],), dtype=np.float32)
+        contact_feet_vel = feet_vel * contacts[:, :, None]
+        return np.sum(np.square(contact_feet_vel[:, :, :3]), axis=(1, 2)).astype(np.float32)
+
     def _update_feet_air_time(self, info: dict):
         feet_air_time = info["feet_air_time"]
         feet_air_time += self.cfg.ctrl_dt
@@ -432,3 +500,27 @@ class K1WalkTask(NpEnv):
         cquery = self._model.get_contact_query(data)
         colliding = cquery.is_colliding(self.collision_contact_pairs)
         return np.sum(colliding.reshape((self._num_envs, self.collision_check_num)), axis=1)
+
+    def _average_geom_vector(self, geoms, data: mtx.SceneData, getter: str) -> np.ndarray:
+        if not geoms:
+            return np.zeros((data.shape[0], 3), dtype=np.float32)
+        values = []
+        for geom in geoms:
+            method = getattr(geom, getter, None)
+            if method is None:
+                return np.zeros((data.shape[0], 3), dtype=np.float32)
+            value = method(data)
+            if getter == "get_pose":
+                value = value[:, :3]
+            values.append(value.astype(np.float32))
+        return np.mean(np.stack(values, axis=1), axis=1).astype(np.float32)
+
+    def _get_foot_positions(self, data: mtx.SceneData) -> np.ndarray:
+        left_pos = self._average_geom_vector(self._left_foot_geoms, data, "get_pose")
+        right_pos = self._average_geom_vector(self._right_foot_geoms, data, "get_pose")
+        return np.stack([left_pos, right_pos], axis=1).astype(np.float32)
+
+    def _get_foot_velocities(self, data: mtx.SceneData) -> np.ndarray:
+        left_vel = self._average_geom_vector(self._left_foot_geoms, data, "get_linear_velocity")
+        right_vel = self._average_geom_vector(self._right_foot_geoms, data, "get_linear_velocity")
+        return np.stack([left_vel, right_vel], axis=1).astype(np.float32)
