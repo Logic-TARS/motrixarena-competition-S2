@@ -94,6 +94,28 @@ class Normalization:
 
 
 @dataclass
+class NoiseScales:
+    dof_pos: float = 0.01
+    dof_vel: float = 1.5
+    ang_vel: float = 0.2
+    gravity: float = 0.05
+
+
+@dataclass
+class Noise:
+    add_noise: bool = True
+    noise_level: float = 1.0
+    noise_scales: NoiseScales = field(default_factory=NoiseScales)
+
+
+@dataclass
+class DomainRand:
+    push_robots: bool = True
+    push_interval_s: float = 5.0
+    max_push_vel_xy: float = 1.5
+
+
+@dataclass
 class Asset:
     body_name: str = "Trunk"
     foot_name: str = "Foot"
@@ -139,7 +161,7 @@ class RewardConfig:
     tracking_sigma: float = 0.25
     min_base_height: float = 0.45
     swing_height: float = 0.08
-    target_base_height: float = 0.68
+    target_base_height: float = 0.54
     max_tilt_xy: float = 0.55
     soft_dof_pos_limit: float = 0.9
     forward_vel_margin: float = 0.15
@@ -167,6 +189,8 @@ class K1WalkNpEnvCfg(EnvCfg):
     init_state: InitState = field(default_factory=InitState)
     commands: Commands = field(default_factory=Commands)
     normalization: Normalization = field(default_factory=Normalization)
+    noise: Noise = field(default_factory=Noise)
+    domain_rand: DomainRand = field(default_factory=DomainRand)
     asset: Asset = field(default_factory=Asset)
     sensor: Sensor = field(default_factory=Sensor)
     sim_dt: float = 0.002
@@ -254,6 +278,8 @@ class K1BallNavigateEnvCfg(EnvCfg):
     init_state: InitState = field(default_factory=InitState)
     commands: Commands = field(default_factory=Commands)
     normalization: Normalization = field(default_factory=Normalization)
+    noise: Noise = field(default_factory=Noise)
+    domain_rand: DomainRand = field(default_factory=DomainRand)
     asset: Asset = field(default_factory=Asset)
     sensor: Sensor = field(default_factory=Sensor)
     ball_config: BallConfig = field(default_factory=BallConfig)
@@ -316,6 +342,8 @@ class K1PointNavigateEnvCfg(EnvCfg):
     init_state: InitState = field(default_factory=InitState)
     commands: Commands = field(default_factory=Commands)
     normalization: Normalization = field(default_factory=Normalization)
+    noise: Noise = field(default_factory=Noise)
+    domain_rand: DomainRand = field(default_factory=DomainRand)
     asset: Asset = field(default_factory=Asset)
     sensor: Sensor = field(default_factory=Sensor)
     point_config: PointNavigateConfig = field(default_factory=PointNavigateConfig)

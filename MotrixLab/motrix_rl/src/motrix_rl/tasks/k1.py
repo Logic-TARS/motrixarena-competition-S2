@@ -49,8 +49,17 @@ class rslrl:
             runner.num_steps_per_env = 24
             runner.save_interval = 50
             runner.experiment_name = "k1_g1_style_walk"
+            runner.obs_groups = {"actor": ["policy"], "critic": ["privileged"]}
+            runner.actor.class_name = "RNNModel"
             runner.actor.hidden_dims = [32]
+            runner.actor.rnn_type = "lstm"
+            runner.actor.rnn_hidden_dim = 64
+            runner.actor.rnn_num_layers = 1
+            runner.critic.class_name = "RNNModel"
             runner.critic.hidden_dims = [32]
+            runner.critic.rnn_type = "lstm"
+            runner.critic.rnn_hidden_dim = 64
+            runner.critic.rnn_num_layers = 1
             runner.actor.init_noise_std = 0.8
 
             algo.learning_rate = 1e-3

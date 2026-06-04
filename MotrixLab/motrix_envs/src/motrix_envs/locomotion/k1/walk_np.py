@@ -85,6 +85,7 @@ class K1WalkTask(NpEnv):
             [cfg.normalization.lin_vel, cfg.normalization.lin_vel, cfg.normalization.ang_vel],
             dtype=np.float32,
         )
+        self.noise_scale_vec = self._get_noise_scale_vec()
 
         self.default_angles = np.zeros(self._num_action, dtype=np.float32)
         self.kps = np.zeros(self._num_action, dtype=np.float32)
@@ -199,6 +200,23 @@ class K1WalkTask(NpEnv):
         if np.any(resample_mask):
             info["commands"][resample_mask] = self.resample_commands(int(np.sum(resample_mask)))
 
+    def _maybe_push_robots(self, state: NpEnvState) -> None:
+        cfg = self.cfg.domain_rand
+        if not cfg.push_robots:
+            return
+        push_steps = max(int(cfg.push_interval_s / self.cfg.ctrl_dt), 1)
+        push_mask = (state.info["episode_length"] % push_steps) == 0
+        if not np.any(push_mask):
+            return
+        pushed = np.random.uniform(
+            -cfg.max_push_vel_xy,
+            cfg.max_push_vel_xy,
+            size=(int(np.sum(push_mask)), 2),
+        ).astype(np.float32)
+        dof_vel = state.data.dof_vel.copy()
+        dof_vel[push_mask, :2] = pushed
+        state.data.set_dof_vel(dof_vel)
+
     def _compute_torques(self, actions, data):
         target_pos = actions * self.cfg.control_config.action_scale + self.default_angles
         torques = self.kps * (target_pos - self.get_dof_pos(data)) - self.kds * self.get_dof_vel(data)
@@ -210,13 +228,29 @@ class K1WalkTask(NpEnv):
     def get_gyro(self, data: mtx.SceneData) -> np.ndarray:
         return self._model.get_sensor_value(self.cfg.sensor.gyro, data)
 
+    def get_privileged_obs(self, data: mtx.SceneData, info: dict) -> np.ndarray:
+        linvel = self.get_local_linvel(data) * self.cfg.normalization.lin_vel
+        actor_obs = self._get_obs(data, info, add_noise=False)
+        return np.concatenate([linvel, actor_obs], axis=1).astype(np.float32)
+
     def update_state(self, state):
+        self._maybe_push_robots(state)
         state = self.update_observation(state)
         state = self.update_terminated(state)
         state = self.update_reward(state)
         return state
 
-    def _get_obs(self, data: mtx.SceneData, info: dict) -> np.ndarray:
+    def _get_noise_scale_vec(self) -> np.ndarray:
+        noise_vec = np.zeros((self._num_observation,), dtype=np.float32)
+        noise_scales = self.cfg.noise.noise_scales
+        noise_level = self.cfg.noise.noise_level
+        noise_vec[0:3] = noise_scales.ang_vel * noise_level * self.cfg.normalization.ang_vel
+        noise_vec[3:6] = noise_scales.gravity * noise_level
+        noise_vec[9:21] = noise_scales.dof_pos * noise_level * self.cfg.normalization.dof_pos
+        noise_vec[21:33] = noise_scales.dof_vel * noise_level * self.cfg.normalization.dof_vel
+        return noise_vec
+
+    def _get_obs(self, data: mtx.SceneData, info: dict, add_noise: bool = True) -> np.ndarray:
         gyro = self.get_gyro(data)
         pose = self._body.get_pose(data)
         base_quat = pose[:, 3:7]
@@ -233,6 +267,8 @@ class K1WalkTask(NpEnv):
         obs[:, 33:45] = info["current_actions"]
         obs[:, 45] = np.sin(2 * np.pi * gait)
         obs[:, 46] = np.cos(2 * np.pi * gait)
+        if add_noise and self.cfg.noise.add_noise:
+            obs += (2.0 * np.random.rand(*obs.shape).astype(np.float32) - 1.0) * self.noise_scale_vec
         return obs
 
     def update_observation(self, state: NpEnvState):
