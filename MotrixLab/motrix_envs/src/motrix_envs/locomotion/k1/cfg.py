@@ -141,8 +141,8 @@ class Noise:
 @dataclass
 class DomainRand:
     push_robots: bool = True
-    push_interval_s: float = 5.0
-    max_push_vel_xy: float = 1.5
+    push_interval_s: float = 8.0
+    max_push_vel_xy: float = 0.5
 
 
 @dataclass
