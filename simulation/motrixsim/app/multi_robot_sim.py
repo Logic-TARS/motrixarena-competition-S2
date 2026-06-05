@@ -54,6 +54,15 @@ from .runtime_config import (
     CMD_VEL_NORM_MIN,
     K1_LEGGED_GYM_NUM_OBS,
     K1_LEGGED_GYM_TORQUE_LIMIT,
+    K1_MOTRIXLAB_ACTION_SCALE,
+    K1_MOTRIXLAB_CMD_SCALE,
+    K1_MOTRIXLAB_DOF_POS_SCALE,
+    K1_MOTRIXLAB_DOF_VEL_SCALE,
+    K1_MOTRIXLAB_GYRO_SCALE,
+    K1_MOTRIXLAB_KD,
+    K1_MOTRIXLAB_KP,
+    K1_MOTRIXLAB_TORQUE_LIMIT,
+    K1_POLICY_FLAVOR_MOTRIXLAB,
     K1_ROBOT_TYPE,
     MAX_ROBOTS_PER_TEAM,
     PI_PLUS_KD_POLICY_ORDER,
@@ -1735,7 +1744,8 @@ class MultiRobotMotrixSim:
                     self._policy_action_dim = K1_LEGGED_GYM_NUM_ACT
                     print(
                         f"[MultiRobotMotrixSim] K1 legged_gym TorchScript: {path} "
-                        f"(obs_dim={self._policy_obs_dim}, act_dim={self._policy_action_dim})"
+                        f"(obs_dim={self._policy_obs_dim}, act_dim={self._policy_action_dim}, "
+                        f"flavor={self.robot_cfg.k1_policy_flavor})"
                     )
                     return
 
@@ -1749,7 +1759,8 @@ class MultiRobotMotrixSim:
                 self._policy_is_torchscript = False
                 print(
                     f"[MultiRobotMotrixSim] K1 legged_gym Torch actor: {path} "
-                    f"(obs_dim={self._policy_obs_dim}, act_dim={self._policy_action_dim})"
+                    f"(obs_dim={self._policy_obs_dim}, act_dim={self._policy_action_dim}, "
+                    f"flavor={self.robot_cfg.k1_policy_flavor})"
                 )
                 return
 
@@ -2024,9 +2035,14 @@ class MultiRobotMotrixSim:
                 k1_gait_phase = 0.0
                 for i, jn in enumerate(K1_LEGGED_GYM_LEG_JOINTS_POLICY_ORDER):
                     li = int(leg_idx_list[i])
-                    kp[li] = float(K1_LEGGED_GYM_KP[jn])
-                    kd[li] = float(K1_LEGGED_GYM_KD[jn])
-                    effort[li] = float(K1_LEGGED_GYM_TORQUE_LIMIT)
+                    if self.robot_cfg.k1_policy_flavor == K1_POLICY_FLAVOR_MOTRIXLAB:
+                        kp[li] = float(K1_MOTRIXLAB_KP[jn])
+                        kd[li] = float(K1_MOTRIXLAB_KD[jn])
+                        effort[li] = float(K1_MOTRIXLAB_TORQUE_LIMIT[jn])
+                    else:
+                        kp[li] = float(K1_LEGGED_GYM_KP[jn])
+                        kd[li] = float(K1_LEGGED_GYM_KD[jn])
+                        effort[li] = float(K1_LEGGED_GYM_TORQUE_LIMIT)
             k1_amp_hist = None
             k1_amp_last_mjcf = None
             k1_amp_gather_mjcf = None
@@ -2173,6 +2189,20 @@ class MultiRobotMotrixSim:
         diff = (dof_pos_leg - spec.k1_legged_default_dof) * float(K1_LEGGED_GYM_DOF_POS_SCALE)
         dvel = dof_vel_leg * float(K1_LEGGED_GYM_DOF_VEL_SCALE)
         last_a = spec.k1_legged_last_action.astype(np.float32)
+
+        if self.robot_cfg.k1_policy_flavor == K1_POLICY_FLAVOR_MOTRIXLAB:
+            obs = np.zeros((K1_LEGGED_GYM_NUM_OBS,), dtype=np.float32)
+            obs[0:3] = gyro.astype(np.float32) * float(K1_MOTRIXLAB_GYRO_SCALE)
+            obs[3:6] = gravity
+            obs[6:9] = self._k1_legged_cmd_obs_from_norm_cmd(cmd_src) * K1_MOTRIXLAB_CMD_SCALE
+            obs[9:21] = (dof_pos_leg - spec.k1_legged_default_dof) * float(K1_MOTRIXLAB_DOF_POS_SCALE)
+            obs[21:33] = dof_vel_leg * float(K1_MOTRIXLAB_DOF_VEL_SCALE)
+            obs[33:45] = last_a
+            obs[45] = s_g
+            obs[46] = c_g
+            obs = np.nan_to_num(obs, nan=0.0, posinf=0.0, neginf=0.0)
+            c = float(self.robot_cfg.obs_clip)
+            return np.clip(obs, -c, c)
 
         obs = np.zeros((K1_LEGGED_GYM_NUM_OBS,), dtype=np.float32)
         obs[0:3] = gravity
@@ -2483,9 +2513,13 @@ class MultiRobotMotrixSim:
                         jidx = int(spec.k1_legged_joint_indices[kk])
                         spec.last_action[jidx] = act[kk]
                     spec.target_joint_pos[:] = spec.init_angles
-                    asc = float(K1_LEGGED_GYM_ACTION_SCALE)
                     for kk in range(K1_LEGGED_GYM_NUM_ACT):
                         jidx = int(spec.k1_legged_joint_indices[kk])
+                        jn = K1_LEGGED_GYM_LEG_JOINTS_POLICY_ORDER[kk]
+                        if self.robot_cfg.k1_policy_flavor == K1_POLICY_FLAVOR_MOTRIXLAB:
+                            asc = float(K1_MOTRIXLAB_ACTION_SCALE[jn])
+                        else:
+                            asc = float(K1_LEGGED_GYM_ACTION_SCALE)
                         spec.target_joint_pos[jidx] = float(spec.k1_legged_default_dof[kk] + act[kk] * asc)
                     if spec.joint_lower is not None and spec.joint_upper is not None:
                         np.clip(spec.target_joint_pos, spec.joint_lower, spec.joint_upper, out=spec.target_joint_pos)
@@ -2559,6 +2593,10 @@ class MultiRobotMotrixSim:
         for k in range(n):
             ai = int(idx[k])
             ctrl = float(val[k])
+            try:
+                self.data.actuator_ctrls[0, ai] = ctrl
+            except Exception:
+                pass
             applied = False
             try:
                 actuator = self.model.get_actuator(ai)

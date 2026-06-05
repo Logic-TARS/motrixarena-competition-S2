@@ -28,6 +28,14 @@
   - 机器人资源、旧 policy 和一些兼容脚本。
   - 训练配置中有硬编码路径会引用 `legged_gym/resources/robots/K1/k1_train_scene.xml`，运行配置也会引用 `legged_gym/policy/booster_k1/model_4700.onnx`，所以不要随便移动或删除。
 
+- `docs/`
+  - 根目录原有的启动、训练、比赛和整理说明文档。
+  - 这些文件不参与运行，归档在这里方便根目录保持清爽。
+
+- `tools/`
+  - 一次性维护/补丁脚本。
+  - 当前包含 `_patch_gait.py`，不是常规运行入口。
+
 ## 根目录模型文件
 
 - `model_20000_new.onnx`
@@ -60,13 +68,13 @@
 训练 K1：
 
 ```bash
-cd /opt/sim_soccer2/MotrixLab
+cd /opt/sim_soccer2_walk_0527/MotrixLab
 conda run -n sim_soccer_rl bash scripts/train_k1.sh
 ```
 
 K1 环境 smoke test：
 
 ```bash
-cd /opt/sim_soccer2/MotrixLab
-conda run -n sim_soccer_rl env PYTHONPATH=/opt/sim_soccer2/MotrixLab/motrix_envs/src:/opt/sim_soccer2/MotrixLab/motrix_rl/src python scripts/smoke_k1_env.py --num-envs 4 --steps 16 --zero-action
+cd /opt/sim_soccer2_walk_0527/MotrixLab
+conda run -n sim_soccer_rl env PYTHONPATH=/opt/sim_soccer2_walk_0527/MotrixLab/motrix_envs/src:/opt/sim_soccer2_walk_0527/MotrixLab/motrix_rl/src python scripts/smoke_k1_env.py --num-envs 4 --steps 16 --zero-action
 ```

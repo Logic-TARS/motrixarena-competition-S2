@@ -273,6 +273,7 @@ class SimAgent:
         self.league = self._config.get("league", "S") # Fix: Explicitly set league (Default S)
         # Simulation control frequency (Hz). <= 0 means unlimited lockstep speed.
         self.sim_hz = self._config.get("sim_hz", 50.0) if sim_hz is None else sim_hz
+        self.sim_fixed_cmd = None
         
         # Override with command line arg if provided
         if args:
@@ -287,6 +288,12 @@ class SimAgent:
 
             if hasattr(args, "sim_hz") and args.sim_hz is not None:
                 self.sim_hz = args.sim_hz
+            if hasattr(args, "sim_fixed_cmd") and args.sim_fixed_cmd:
+                parts = [p.strip() for p in str(args.sim_fixed_cmd).split(",")]
+                if len(parts) != 3:
+                    raise ValueError("--sim-fixed-cmd must be formatted as vx,vy,w")
+                self.sim_fixed_cmd = [float(p) for p in parts]
+                self.sim_fixed_cmd = [float(np.clip(v, -1.0, 1.0)) for v in self.sim_fixed_cmd]
 
             # Configure team offset based on resolved color
             if self.color:
@@ -334,6 +341,8 @@ class SimAgent:
             self.logger.info(f"[SimCore] Control frequency limited to {self.sim_hz:.2f} Hz")
         else:
             self.logger.info("[SimCore] Control frequency unlimited (lockstep max speed)")
+        if self.sim_fixed_cmd is not None:
+            self.logger.info(f"[SimCore] Fixed sim command enabled: {self.sim_fixed_cmd}")
 
         self.logger.info(f"[SimCore] Final Robot ID: {self.id}")
         
@@ -377,8 +386,11 @@ class SimAgent:
         while True:
             try:
                 loop_start = time.perf_counter()
-                # 1. User Loop (Think)
-                user_entry.loop(self)
+                # 1. User Loop (Think), or fixed command for locomotion debugging.
+                if self.sim_fixed_cmd is None:
+                    user_entry.loop(self)
+                else:
+                    self.current_cmd = list(self.sim_fixed_cmd)
                 
                 # 2. Sync with Sim (Action -> State)
                 # Send current_cmd, receive new state
@@ -519,6 +531,11 @@ if __name__ == "__main__":
     parser.add_argument("--id", type=int, default=None, help="Robot ID (overrides config)")
     parser.add_argument("--color", type=str, default=None, choices=["red", "blue"], help="Team color (red/blue). If set, --id is interpreted as player number within team.")
     parser.add_argument("--sim-hz", dest="sim_hz", type=float, default=None, help="Simulation control frequency in Hz (<=0 for unlimited)")
+    parser.add_argument(
+        "--sim-fixed-cmd",
+        default=None,
+        help="Debug only: send fixed normalized final command vx,vy,w to the simulator, bypassing user_entry logic.",
+    )
     
     # We need to handle known vs unknown args because ROS args might be present if users mistake
     # But since we control the call:

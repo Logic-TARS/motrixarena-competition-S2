@@ -346,6 +346,72 @@ K1_LEGGED_GYM_KD = {
     "Right_Ankle_Roll": 1.0,
 }
 
+# MotrixLab/motrix_envs K1 walk_np policy constants. This policy is also 47->12,
+# but its observation layout and action-to-target scaling differ from legged_gym/T1.
+K1_POLICY_FLAVOR_LEGGED_GYM = "legged_gym"
+K1_POLICY_FLAVOR_MOTRIXLAB = "motrixlab"
+K1_POLICY_FLAVORS = (K1_POLICY_FLAVOR_LEGGED_GYM, K1_POLICY_FLAVOR_MOTRIXLAB)
+K1_MOTRIXLAB_CMD_SCALE = np.array([2.0, 2.0, 0.25], dtype=np.float32)
+K1_MOTRIXLAB_DOF_POS_SCALE = 1.0
+K1_MOTRIXLAB_DOF_VEL_SCALE = 0.05
+K1_MOTRIXLAB_GYRO_SCALE = 0.25
+K1_MOTRIXLAB_ACTION_SCALE = {
+    "Left_Hip_Pitch": 0.1700,
+    "Right_Hip_Pitch": 0.1700,
+    "Left_Hip_Roll": 0.1900,
+    "Right_Hip_Roll": 0.1900,
+    "Left_Hip_Yaw": 0.09575,
+    "Right_Hip_Yaw": 0.09575,
+    "Left_Knee_Pitch": 0.1867,
+    "Right_Knee_Pitch": 0.1867,
+    "Left_Ankle_Pitch": 0.2394,
+    "Right_Ankle_Pitch": 0.2394,
+    "Left_Ankle_Roll": 0.2394,
+    "Right_Ankle_Roll": 0.2394,
+}
+K1_MOTRIXLAB_TORQUE_LIMIT = {
+    "Left_Hip_Pitch": 68.0,
+    "Right_Hip_Pitch": 68.0,
+    "Left_Hip_Roll": 76.0,
+    "Right_Hip_Roll": 76.0,
+    "Left_Hip_Yaw": 38.3,
+    "Right_Hip_Yaw": 38.3,
+    "Left_Knee_Pitch": 112.0,
+    "Right_Knee_Pitch": 112.0,
+    "Left_Ankle_Pitch": 38.3,
+    "Right_Ankle_Pitch": 38.3,
+    "Left_Ankle_Roll": 38.3,
+    "Right_Ankle_Roll": 38.3,
+}
+K1_MOTRIXLAB_KP = {
+    "Left_Hip_Pitch": 100.0,
+    "Right_Hip_Pitch": 100.0,
+    "Left_Hip_Roll": 100.0,
+    "Right_Hip_Roll": 100.0,
+    "Left_Hip_Yaw": 100.0,
+    "Right_Hip_Yaw": 100.0,
+    "Left_Knee_Pitch": 150.0,
+    "Right_Knee_Pitch": 150.0,
+    "Left_Ankle_Pitch": 40.0,
+    "Right_Ankle_Pitch": 40.0,
+    "Left_Ankle_Roll": 40.0,
+    "Right_Ankle_Roll": 40.0,
+}
+K1_MOTRIXLAB_KD = {
+    "Left_Hip_Pitch": 2.0,
+    "Right_Hip_Pitch": 2.0,
+    "Left_Hip_Roll": 2.0,
+    "Right_Hip_Roll": 2.0,
+    "Left_Hip_Yaw": 2.0,
+    "Right_Hip_Yaw": 2.0,
+    "Left_Knee_Pitch": 4.0,
+    "Right_Knee_Pitch": 4.0,
+    "Left_Ankle_Pitch": 2.0,
+    "Right_Ankle_Pitch": 2.0,
+    "Left_Ankle_Roll": 2.0,
+    "Right_Ankle_Roll": 2.0,
+}
+
 PI_PLUS_RESET_JOINT_POS = {
     "l_hip_pitch_joint": -0.25,
     "l_shoulder_pitch_joint": 0.0,
@@ -398,6 +464,7 @@ class RobotRuntimeConfig:
     use_k1_legged_gym_policy: bool = False
     k1_stand_policy: Path | None = None
     use_k1_amp_onnx: bool = False
+    k1_policy_flavor: str = K1_POLICY_FLAVOR_LEGGED_GYM
 
 
 @dataclass
@@ -514,9 +581,12 @@ def build_robot_runtime_config(
     policy_override: Path | None,
     robot_xml_override: Path | None,
     use_k1_legged_gym: bool = True,
+    k1_policy_flavor: str = K1_POLICY_FLAVOR_LEGGED_GYM,
 ) -> RobotRuntimeConfig:
     rt = _normalize_robot_type(robot_type)
     if rt == K1_ROBOT_TYPE:
+        if k1_policy_flavor not in K1_POLICY_FLAVORS:
+            raise ValueError(f"Unsupported K1 policy flavor: {k1_policy_flavor}")
         repo_root = mujoco_dir.parent.parent
         default_pt_policy = mujoco_dir / "assets" / "policies" / "k1_model_46000.pt"
         default_legged_onnx_preferred = repo_root / "model_20000_new.onnx"
@@ -622,6 +692,7 @@ def build_robot_runtime_config(
             use_k1_legged_gym_policy=want_legged and not use_k1_amp_onnx,
             k1_stand_policy=None if use_k1_amp_onnx else k1_stand_policy,
             use_k1_amp_onnx=use_k1_amp_onnx,
+            k1_policy_flavor=k1_policy_flavor,
         )
     return RobotRuntimeConfig(
         robot_type=PI_PLUS_ROBOT_TYPE,
@@ -652,6 +723,7 @@ def build_robot_runtime_config(
         use_k1_legged_gym_policy=False,
         k1_stand_policy=None,
         use_k1_amp_onnx=False,
+        k1_policy_flavor=K1_POLICY_FLAVOR_LEGGED_GYM,
     )
 
 
@@ -731,6 +803,13 @@ def parse_runtime_args(mujoco_dir: Path) -> RuntimeArgs:
         "Use --no-k1-legged-gym for legacy k1_model_46000.pt only. "
         "--policy overrides walk policy; .pt files are auto-classified (47->12 legged vs 78->22 full body).",
     )
+    parser.add_argument(
+        "--k1-policy-flavor",
+        choices=K1_POLICY_FLAVORS,
+        default=K1_POLICY_FLAVOR_LEGGED_GYM,
+        help="K1 47->12 policy compatibility mode. Use 'motrixlab' for policies trained by "
+        "MotrixLab/motrix_envs k1-flat-terrain-walk; keep 'legged_gym' for legacy T1/legged_gym models.",
+    )
     ns = parser.parse_args()
     team_size = _clamp_team_count(ns.team_size)
     robot_cfg = build_robot_runtime_config(
@@ -739,6 +818,7 @@ def parse_runtime_args(mujoco_dir: Path) -> RuntimeArgs:
         policy_override=ns.policy,
         robot_xml_override=ns.robot_xml,
         use_k1_legged_gym=ns.k1_legged_gym,
+        k1_policy_flavor=ns.k1_policy_flavor,
     )
     return RuntimeArgs(
         robot_type=robot_cfg.robot_type,
