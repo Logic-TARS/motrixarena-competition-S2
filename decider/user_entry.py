@@ -22,6 +22,7 @@ from logic.policy_statemachines import goalkeeper
 import csv
 from datetime import datetime
 
+
 class DataRecorder:
     def __init__(self, log_dir):
         self.log_dir = log_dir
@@ -419,14 +420,9 @@ def loop(agent) -> None:
         traceback.print_exc()
 
 def game(agent) -> None:
-    # # --- Debug Coordinates ---
-    # from debug_coords import debug_coords
-    # debug_coords(agent)
-
     if getattr(agent, "is_simulation", False):
-        if not agent.get_if_ball():
-            agent.state_machine_runners['find_ball']()
-            return
+        with open("/tmp/game_trace.txt", "a") as f:
+            f.write("game() called, has_ball=%s\n" % agent.get_if_ball())
         _simple_sim_chase(agent, agent.get_ball_distance())
         return
     
@@ -489,7 +485,11 @@ def _gc_test_go_back_to_field(agent):
     agent.stop()  
 
 def _simple_sim_chase(agent, ball_dist: float) -> None:
-    """Small simulation controller for validating locomotion before full tactics."""
+    """K1 ball chasing — MotrixLab policy: vy>0=body-backward+CCW rotation.
+    At default yaw=-pi/2: body-backward=world+Y=toward-ball.
+    Continuous vy>0 produces spiral approach. Low vy reduces rotation drift.
+    """
+    import sys
     logger = agent.get_logger()
     ball_pos = agent.get_ball_pos()
     if ball_pos is None or ball_pos[0] is None or ball_pos[1] is None:
@@ -498,37 +498,34 @@ def _simple_sim_chase(agent, ball_dist: float) -> None:
 
     ball_x = float(ball_pos[0])
     ball_y = float(ball_pos[1])
-    ball_angle = agent.get_ball_angle()
-    if ball_angle is None:
-        agent.stop()
-        return
+    ball_angle = math.atan2(ball_y, ball_x)
+    ball_dist = math.hypot(ball_x, ball_y)
 
-    abs_angle = abs(ball_angle)
-    if ball_dist < 0.35:
-        cmd_x = 0.0
-        cmd_y = 0.0
-        cmd_w = 0.0
-    elif abs_angle > 0.55:
-        # Current K1 sim2sim mapping overreacts to lateral commands. Turn first,
-        # then walk once the ball is near the forward axis.
-        cmd_x = 0.0
-        cmd_y = 0.0
-        cmd_w = float(np.clip(-0.7 * ball_angle, -0.45, 0.45))
+    if ball_dist < 0.5:
+        cmd_x, cmd_y, cmd_w = 0.0, 0.0, 0.0
     else:
-        alignment = max(0.0, math.cos(ball_angle))
-        cmd_x = float(np.clip(0.25 + 0.35 * alignment, 0.20, 0.55))
-        cmd_y = 0.0
-        cmd_w = float(np.clip(-0.45 * ball_angle, -0.25, 0.25))
+        spd = float(np.clip(0.08 * ball_dist, 0.10, 0.25))
+        cmd_x = 0.0
+        cmd_y = spd
+        cmd_w = 0.0
 
     logger.info(
         f"[SIM_CHASE] ball=({ball_x:.2f},{ball_y:.2f}) dist={ball_dist:.2f} "
-        f"angle={math.degrees(ball_angle):.1f} cmd=({cmd_x:.2f},{cmd_y:.2f},{cmd_w:.2f})"
+        f"angle={math.degrees(ball_angle):.1f} "
+        f"cmd=({cmd_x:.2f},{cmd_y:.2f},{cmd_w:.2f})"
     )
+    print(f"[CHASE] a={math.degrees(ball_angle):.1f} d={ball_dist:.2f} cmd=({cmd_x:.2f},{cmd_y:.2f},{cmd_w:.2f})", file=sys.stderr, flush=True)
     if getattr(agent, "is_simulation", False):
         agent.current_cmd = [cmd_x, cmd_y, cmd_w]
     else:
         agent.cmd_vel(cmd_x, cmd_y, cmd_w)
     agent.move_head(math.inf, math.inf)
+    rpos = agent.get_self_pos()
+    ryaw = agent.get_self_yaw()
+    with open("/tmp/chase_trace.txt", "a") as f:
+        f.write("cmd=(%.2f,%.2f,%.2f) ball=(%.2f,%.2f) dist=%.2f angle=%.1f rpos=(%.2f,%.2f) ryaw=%.2f\n" % (
+            cmd_x, cmd_y, cmd_w, ball_x, ball_y, ball_dist, math.degrees(ball_angle),
+            rpos[0] if rpos[0] is not None else -999, rpos[1] if rpos[1] is not None else -999, ryaw if ryaw is not None else -999))
 
 def _test_agents(agent):
     """

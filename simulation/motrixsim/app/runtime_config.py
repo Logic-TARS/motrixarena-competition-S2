@@ -657,7 +657,7 @@ def build_robot_runtime_config(
                 k1_stand_policy = None
             elif want_legged and not policy_final.is_file():
                 raise FileNotFoundError(f"K1 legged policy not found: {policy_final}")
-            if want_legged and not use_k1_amp_onnx and default_pt_policy.is_file():
+            if want_legged and not use_k1_amp_onnx and k1_policy_flavor != K1_POLICY_FLAVOR_MOTRIXLAB and default_pt_policy.is_file():
                 d_stand = infer_k1_pt_policy_io(default_pt_policy)
                 if d_stand == (K1_FULL_BODY_NUM_OBS, K1_FULL_BODY_NUM_ACT):
                     k1_stand_policy = default_pt_policy

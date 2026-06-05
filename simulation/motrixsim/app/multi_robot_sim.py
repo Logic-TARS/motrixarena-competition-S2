@@ -3401,7 +3401,7 @@ class MultiRobotMotrixSim:
                     cmds = webview.poll_commands()
                     counter, reset_triggered = self._apply_web_commands(cmds, counter)
 
-                flags = zmq.NOBLOCK if webview is not None else 0
+                flags = zmq.NOBLOCK  # always non-blocking so sim steps at physics rate
                 got_msg = False
                 msg = None
                 try:
@@ -3445,7 +3445,7 @@ class MultiRobotMotrixSim:
                         "ack_timestamp": client_ts,
                     }
                     socket.send_json(response)
-                elif webview is not None and not reset_triggered:
+                elif not reset_triggered:
                     counter = self._step_once(counter)
 
                 if webview is not None:
