@@ -6,7 +6,7 @@ from pathlib import Path
 PROJECT = Path(__file__).resolve().parents[1]
 SIM = PROJECT / "simulation" / "motrixsim" / "sim2sim_runner.py"
 DECIDER = PROJECT / "decider" / "decider.py"
-POLICY = PROJECT / "MotrixLab" / "exported" / "k1_top_run_1600_torchscript.pt"
+POLICY = PROJECT / "MotrixLab" / "exported" / "k1_point_navigate_torchscript.pt"
 SIM_ENV = "/home/1ctnltug/miniconda3/envs/motrixsim0508/bin/python"
 DEC_ENV = "/home/1ctnltug/miniconda3/envs/k1/bin/python"
 SIM_PORT = 5556

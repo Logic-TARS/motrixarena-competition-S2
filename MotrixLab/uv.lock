@@ -580,6 +580,10 @@ requires-dist = [{ name = "motrixsim", specifier = ">=0.7.0" }]
 name = "motrix-lab"
 version = "0.3.0"
 source = { virtual = "." }
+dependencies = [
+    { name = "gitpython" },
+    { name = "tensordict" },
+]
 
 [package.optional-dependencies]
 docs = [
@@ -597,6 +601,7 @@ docs = [
 [package.metadata]
 requires-dist = [
     { name = "autodocsumm", marker = "extra == 'docs'" },
+    { name = "gitpython", specifier = ">=3.1.46" },
     { name = "myst-parser", marker = "extra == 'docs'" },
     { name = "pydata-sphinx-theme", marker = "extra == 'docs'" },
     { name = "sphinx", marker = "extra == 'docs'" },
@@ -605,6 +610,7 @@ requires-dist = [
     { name = "sphinx-subfigure", marker = "extra == 'docs'" },
     { name = "sphinx-togglebutton", marker = "extra == 'docs'" },
     { name = "sphinxcontrib-video", marker = "extra == 'docs'" },
+    { name = "tensordict", specifier = ">=0.11.0" },
 ]
 provides-extras = ["docs"]
 

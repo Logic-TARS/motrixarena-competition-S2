@@ -485,9 +485,12 @@ def _gc_test_go_back_to_field(agent):
     agent.stop()  
 
 def _simple_sim_chase(agent, ball_dist: float) -> None:
-    """K1 ball chasing — MotrixLab policy: vy>0=body-backward+CCW rotation.
-    At default yaw=-pi/2: body-backward=world+Y=toward-ball.
-    Continuous vy>0 produces spiral approach. Low vy reduces rotation drift.
+    """K1 ball chasing with k1-point-navigate policy.
+
+    Computes body-frame navigation commands from ball position (heading + distance),
+    matching the training-time _compute_commands logic:
+      cmd_vx = clip(0.45 * dist, 0, 0.55)
+      cmd_wz = clip(1.2 * heading, -0.8, 0.8)
     """
     import sys
     logger = agent.get_logger()
@@ -501,13 +504,12 @@ def _simple_sim_chase(agent, ball_dist: float) -> None:
     ball_angle = math.atan2(ball_y, ball_x)
     ball_dist = math.hypot(ball_x, ball_y)
 
-    if ball_dist < 0.5:
+    if ball_dist < 0.35:
         cmd_x, cmd_y, cmd_w = 0.0, 0.0, 0.0
     else:
-        spd = float(np.clip(0.08 * ball_dist, 0.10, 0.25))
-        cmd_x = 0.0
-        cmd_y = spd
-        cmd_w = 0.0
+        cmd_x = float(np.clip(0.45 * ball_dist, 0.0, 0.55))
+        cmd_y = 0.0
+        cmd_w = float(np.clip(1.2 * ball_angle, -0.8, 0.8))
 
     logger.info(
         f"[SIM_CHASE] ball=({ball_x:.2f},{ball_y:.2f}) dist={ball_dist:.2f} "
