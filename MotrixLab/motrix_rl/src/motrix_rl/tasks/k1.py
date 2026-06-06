@@ -109,3 +109,47 @@ class rslrl:
             algo.num_mini_batches = 3
             algo.entropy_coef = 0.001
             algo.desired_kl = 0.008
+
+    @rlcfg("k1-amp-walk")
+    @dataclass
+    class K1AmpWalkRslrlPpo(RslrlCfg):
+        def __post_init__(self):
+            runner = self.runner
+            algo = runner.algorithm
+
+            self.num_envs = 4096
+            runner.seed = 1
+            runner.max_iterations = 10000
+            runner.num_steps_per_env = 24
+            runner.save_interval = 500
+            runner.experiment_name = "k1_amp_walk"
+            runner.obs_groups = {"actor": ["policy"], "critic": ["privileged"]}
+            runner.actor.class_name = "MLPModel"
+            runner.actor.hidden_dims = [1024, 512, 256]
+            runner.actor.noise_std_type = "scalar"
+            runner.actor.state_dependent_std = False
+            runner.critic.class_name = "MLPModel"
+            runner.critic.hidden_dims = [1024, 512, 256]
+            runner.actor.init_noise_std = 0.3
+
+            algo.learning_rate = 1e-3
+            algo.num_learning_epochs = 5
+            algo.num_mini_batches = 4
+            algo.entropy_coef = 0.0005
+            algo.desired_kl = 0.01
+
+    @rlcfg("k1-amp-stand")
+    @dataclass
+    class K1AmpStandRslrlPpo(K1AmpWalkRslrlPpo):
+        def __post_init__(self):
+            super().__post_init__()
+            self.runner.experiment_name = "k1_amp_stand"
+            self.runner.save_interval = 100
+
+    @rlcfg("k1-amp-walk-small")
+    @dataclass
+    class K1AmpWalkSmallRslrlPpo(K1AmpWalkRslrlPpo):
+        def __post_init__(self):
+            super().__post_init__()
+            self.runner.experiment_name = "k1_amp_walk_small"
+            self.runner.save_interval = 100

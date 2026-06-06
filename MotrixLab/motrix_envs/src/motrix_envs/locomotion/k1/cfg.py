@@ -14,6 +14,7 @@
 # ==============================================================================
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from motrix_envs import registry
 from motrix_envs.base import EnvCfg
@@ -381,3 +382,314 @@ class K1PointNavigateEnvCfg(EnvCfg):
     point_config: PointNavigateConfig = field(default_factory=PointNavigateConfig)
     sim_dt: float = 0.002
     ctrl_dt: float = 0.02
+
+
+# --- K1 AMP (Scheme A) ---
+
+K1_AMP_JOINT_ORDER = [
+    "AAHead_yaw",
+    "Head_pitch",
+    "ALeft_Shoulder_Pitch",
+    "Left_Shoulder_Roll",
+    "Left_Elbow_Pitch",
+    "Left_Elbow_Yaw",
+    "ARight_Shoulder_Pitch",
+    "Right_Shoulder_Roll",
+    "Right_Elbow_Pitch",
+    "Right_Elbow_Yaw",
+    "Left_Hip_Pitch",
+    "Left_Hip_Roll",
+    "Left_Hip_Yaw",
+    "Left_Knee_Pitch",
+    "Left_Ankle_Pitch",
+    "Left_Ankle_Roll",
+    "Right_Hip_Pitch",
+    "Right_Hip_Roll",
+    "Right_Hip_Yaw",
+    "Right_Knee_Pitch",
+    "Right_Ankle_Pitch",
+    "Right_Ankle_Roll",
+]
+
+K1_AMP_DEFAULT_JOINT_ANGLES = {
+    "AAHead_yaw": 0.0,
+    "Head_pitch": 0.0,
+    "ALeft_Shoulder_Pitch": 0.0,
+    "Left_Shoulder_Roll": -1.3,
+    "Left_Elbow_Pitch": 0.0,
+    "Left_Elbow_Yaw": -0.5,
+    "ARight_Shoulder_Pitch": 0.0,
+    "Right_Shoulder_Roll": 1.3,
+    "Right_Elbow_Pitch": 0.0,
+    "Right_Elbow_Yaw": 0.5,
+    "Left_Hip_Pitch": -0.15,
+    "Left_Hip_Roll": 0.0,
+    "Left_Hip_Yaw": 0.0,
+    "Left_Knee_Pitch": 0.3,
+    "Left_Ankle_Pitch": -0.15,
+    "Left_Ankle_Roll": 0.0,
+    "Right_Hip_Pitch": -0.15,
+    "Right_Hip_Roll": 0.0,
+    "Right_Hip_Yaw": 0.0,
+    "Right_Knee_Pitch": 0.3,
+    "Right_Ankle_Pitch": -0.15,
+    "Right_Ankle_Roll": 0.0,
+}
+
+K1_AMP_NUM_SINGLE_OBS = 75
+K1_AMP_FRAME_STACK = 5
+K1_AMP_NUM_ACT = 22
+K1_AMP_ACTION_SCALE = 0.25
+K1_AMP_UPPER_BODY_JOINTS = set(K1_AMP_JOINT_ORDER[:10])
+K1_AMP_LEG_JOINTS = K1_AMP_JOINT_ORDER[10:]
+K1_AMP_DEFAULT_MOTION_FILE = str(
+    Path(__file__).resolve().parents[5] / "motions" / "K1" / "k1_mj2_seg1_50fps.npz"
+)
+
+
+@dataclass
+class AmpCommands:
+    lin_vel_x = [0.0, 0.0]
+    lin_vel_y = [0.0, 0.0]
+    ang_vel_yaw = [0.0, 0.0]
+    max_lin_vel_x: float = 0.5
+    max_lin_vel_y: float = 0.4
+    max_ang_vel_yaw: float = 1.0
+    resampling_time: float = 10.0
+    command_deadzone: float = 0.0
+    phase_period: float = 0.8
+
+
+@dataclass
+class AmpNormalization:
+    lin_vel_x: float = 0.5
+    lin_vel_y: float = 0.4
+    ang_vel: float = 0.25
+    dof_pos: float = 1.0
+    dof_vel: float = 0.05
+
+
+@dataclass
+class AmpControlConfig:
+    stiffness: dict[str, float] = field(
+        default_factory=lambda: {
+            "AAHead_yaw": 30.0,
+            "Head_pitch": 30.0,
+            "ALeft_Shoulder_Pitch": 80.0,
+            "Left_Shoulder_Roll": 80.0,
+            "Left_Elbow_Pitch": 60.0,
+            "Left_Elbow_Yaw": 60.0,
+            "ARight_Shoulder_Pitch": 80.0,
+            "Right_Shoulder_Roll": 80.0,
+            "Right_Elbow_Pitch": 60.0,
+            "Right_Elbow_Yaw": 60.0,
+            "Left_Hip_Pitch": 80.0,
+            "Left_Hip_Roll": 80.0,
+            "Left_Hip_Yaw": 80.0,
+            "Left_Knee_Pitch": 80.0,
+            "Left_Ankle_Pitch": 30.0,
+            "Left_Ankle_Roll": 30.0,
+            "Right_Hip_Pitch": 80.0,
+            "Right_Hip_Roll": 80.0,
+            "Right_Hip_Yaw": 80.0,
+            "Right_Knee_Pitch": 80.0,
+            "Right_Ankle_Pitch": 30.0,
+            "Right_Ankle_Roll": 30.0,
+        }
+    )
+    damping: dict[str, float] = field(
+        default_factory=lambda: {
+            "AAHead_yaw": 5.0,
+            "Head_pitch": 5.0,
+            "ALeft_Shoulder_Pitch": 6.0,
+            "Left_Shoulder_Roll": 6.0,
+            "Left_Elbow_Pitch": 5.0,
+            "Left_Elbow_Yaw": 5.0,
+            "ARight_Shoulder_Pitch": 6.0,
+            "Right_Shoulder_Roll": 6.0,
+            "Right_Elbow_Pitch": 5.0,
+            "Right_Elbow_Yaw": 5.0,
+            "Left_Hip_Pitch": 2.0,
+            "Left_Hip_Roll": 2.0,
+            "Left_Hip_Yaw": 2.0,
+            "Left_Knee_Pitch": 2.0,
+            "Left_Ankle_Pitch": 2.0,
+            "Left_Ankle_Roll": 2.0,
+            "Right_Hip_Pitch": 2.0,
+            "Right_Hip_Roll": 2.0,
+            "Right_Hip_Yaw": 2.0,
+            "Right_Knee_Pitch": 2.0,
+            "Right_Ankle_Pitch": 2.0,
+            "Right_Ankle_Roll": 2.0,
+        }
+    )
+    action_scale: dict[str, float] = field(
+        default_factory=lambda: {
+            name: 0.0 if name in K1_AMP_UPPER_BODY_JOINTS else 0.25
+            for name in K1_AMP_JOINT_ORDER
+        }
+    )
+    torque_limit: dict[str, float] = field(
+        default_factory=lambda: {
+            "AAHead_yaw": 20.0,
+            "Head_pitch": 20.0,
+            "ALeft_Shoulder_Pitch": 60.0,
+            "Left_Shoulder_Roll": 60.0,
+            "Left_Elbow_Pitch": 40.0,
+            "Left_Elbow_Yaw": 40.0,
+            "ARight_Shoulder_Pitch": 60.0,
+            "Right_Shoulder_Roll": 60.0,
+            "Right_Elbow_Pitch": 40.0,
+            "Right_Elbow_Yaw": 40.0,
+            "Left_Hip_Pitch": 30.0,
+            "Left_Hip_Roll": 35.0,
+            "Left_Hip_Yaw": 20.0,
+            "Left_Knee_Pitch": 40.0,
+            "Left_Ankle_Pitch": 20.0,
+            "Left_Ankle_Roll": 20.0,
+            "Right_Hip_Pitch": 30.0,
+            "Right_Hip_Roll": 35.0,
+            "Right_Hip_Yaw": 20.0,
+            "Right_Knee_Pitch": 40.0,
+            "Right_Ankle_Pitch": 20.0,
+            "Right_Ankle_Roll": 20.0,
+        }
+    )
+
+
+@dataclass
+class AmpRewardConfig:
+    scales: dict[str, float] = field(
+        default_factory=lambda: {
+            "termination": -500.0,
+            "tracking_lin_vel": 0.0,
+            "tracking_ang_vel": 0.0,
+            "stand_still": -5.0,
+            "lin_vel_z": -1.0,
+            "ang_vel_xy": -0.05,
+            "orientation": -10.0,
+            "base_height": -1.0,
+            "torques": -1.0e-5,
+            "dof_vel": -2.0e-4,
+            "dof_acc": -2.5e-8,
+            "feet_air_time": 0.0,
+            "collision": -1.0,
+            "action_rate": -0.02,
+            "dof_pos_limits": -5.0,
+            "alive": 10.0,
+            "hip_pos": -0.2,
+            "joint_regularization": -0.02,
+            "upper_body_regularization": -1.0,
+            "upper_body_velocity": -0.002,
+            "motion_leg_joint_pos": 0.0,
+            "motion_leg_joint_vel": 0.0,
+            "motion_base_height": 0.0,
+            "contact_no_vel": 0.0,
+            "feet_swing_height": 0.0,
+            "contact": 0.0,
+        }
+    )
+    only_positive_rewards: bool = False
+    trust_contact_rewards: bool = True
+    tracking_sigma: float = 0.25
+    min_base_height: float = 0.42
+    swing_height: float = 0.08
+    target_base_height: float = 0.54
+    max_tilt_xy: float = 0.55
+    soft_dof_pos_limit: float = 0.9
+    gait_frequency: float = 1.5
+    motion_joint_pos_sigma: float = 0.35
+    motion_joint_vel_sigma: float = 3.0
+    motion_base_height_sigma: float = 0.12
+    command_forward_vel_margin: float = 0.03
+
+
+@dataclass
+class AmpMotionReference:
+    enabled: bool = True
+    file: str = K1_AMP_DEFAULT_MOTION_FILE
+    input_fps: float = 50.0
+
+
+@dataclass
+class AmpDomainRand(DomainRand):
+    push_robots: bool = False
+
+
+@dataclass
+class AmpSensor:
+    local_linvel = "local_linvel"
+    gyro = "angular-velocity"
+
+
+@registry.envcfg("k1-amp-walk")
+@dataclass
+class K1AmpWalkEnvCfg(EnvCfg):
+    max_episode_seconds: float = 20.0
+    model_file: str = "/opt/sim_soccer2/legged_gym/resources/robots/K1/K1_22dof.xml"
+    control_config: AmpControlConfig = field(default_factory=AmpControlConfig)
+    reward_config: AmpRewardConfig = field(default_factory=AmpRewardConfig)
+    init_state: InitState = field(default_factory=InitState)
+    commands: AmpCommands = field(default_factory=AmpCommands)
+    normalization: AmpNormalization = field(default_factory=AmpNormalization)
+    noise: Noise = field(default_factory=Noise)
+    domain_rand: AmpDomainRand = field(default_factory=AmpDomainRand)
+    motion_reference: AmpMotionReference = field(default_factory=AmpMotionReference)
+    asset: Asset = field(default_factory=Asset)
+    sensor: AmpSensor = field(default_factory=AmpSensor)
+    sim_dt: float = 0.002
+    ctrl_dt: float = 0.02
+
+
+@registry.envcfg("k1-amp-stand")
+@dataclass
+class K1AmpStandEnvCfg(K1AmpWalkEnvCfg):
+    pass
+
+
+@dataclass
+class AmpWalkSmallCommands(AmpCommands):
+    lin_vel_x = [0.02, 0.08]
+
+
+@dataclass
+class AmpWalkSmallRewardConfig(AmpRewardConfig):
+    scales: dict[str, float] = field(
+        default_factory=lambda: {
+            "termination": -500.0,
+            "tracking_lin_vel": 0.4,
+            "command_forward_vel": 8.0,
+            "overspeed": -6.0,
+            "tracking_ang_vel": 0.0,
+            "stand_still": -0.2,
+            "lin_vel_z": -1.0,
+            "ang_vel_xy": -0.05,
+            "orientation": -10.0,
+            "base_height": -1.0,
+            "torques": -1.0e-5,
+            "dof_vel": -2.0e-4,
+            "dof_acc": -2.5e-8,
+            "feet_air_time": 0.0,
+            "collision": -1.0,
+            "action_rate": -0.02,
+            "dof_pos_limits": -5.0,
+            "alive": 10.0,
+            "hip_pos": -0.2,
+            "joint_regularization": -0.02,
+            "upper_body_regularization": -1.0,
+            "upper_body_velocity": -0.002,
+            "motion_leg_joint_pos": 0.0,
+            "motion_leg_joint_vel": 0.0,
+            "motion_base_height": 0.0,
+            "contact_no_vel": 0.0,
+            "feet_swing_height": 0.0,
+            "contact": 0.0,
+        }
+    )
+
+
+@registry.envcfg("k1-amp-walk-small")
+@dataclass
+class K1AmpWalkSmallEnvCfg(K1AmpWalkEnvCfg):
+    commands: AmpWalkSmallCommands = field(default_factory=AmpWalkSmallCommands)
+    reward_config: AmpWalkSmallRewardConfig = field(default_factory=AmpWalkSmallRewardConfig)

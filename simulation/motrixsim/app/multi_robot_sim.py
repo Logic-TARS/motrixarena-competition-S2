@@ -37,6 +37,7 @@ from .runtime_config import (
     K1_AMP_NUM_OBS,
     K1_AMP_NUM_SINGLE_OBS,
     K1_AMP_ACTION_SCALE,
+    K1_AMP_UPPER_BODY_JOINTS,
     K1_FULL_BODY_NUM_ACT,
     K1_FULL_BODY_NUM_OBS,
     K1_LEGGED_GYM_ACTION_SCALE,
@@ -1464,6 +1465,7 @@ class RobotSpec:
     k1_amp_hist: np.ndarray | None = None
     k1_amp_last_mjcf: np.ndarray | None = None
     k1_amp_gather_mjcf: np.ndarray | None = None
+    k1_amp_upper_mjcf: np.ndarray | None = None
 
 
 class MultiRobotMotrixSim:
@@ -2046,6 +2048,7 @@ class MultiRobotMotrixSim:
             k1_amp_hist = None
             k1_amp_last_mjcf = None
             k1_amp_gather_mjcf = None
+            k1_amp_upper_mjcf = None
             if self.robot_cfg.use_k1_amp_onnx:
                 k1_amp_gather_mjcf = np.asarray(
                     [joint_names.index(n) for n in K1_AMP_ACTUATOR_JOINT_ORDER],
@@ -2053,6 +2056,10 @@ class MultiRobotMotrixSim:
                 )
                 k1_amp_hist = np.zeros((K1_AMP_FRAME_STACK, K1_AMP_NUM_SINGLE_OBS), dtype=np.float32)
                 k1_amp_last_mjcf = np.zeros((K1_AMP_NUM_ACT,), dtype=np.float32)
+                k1_amp_upper_mjcf = np.asarray(
+                    [i for i, name in enumerate(K1_AMP_ACTUATOR_JOINT_ORDER) if name in K1_AMP_UPPER_BODY_JOINTS],
+                    dtype=np.int32,
+                )
             specs[rid] = RobotSpec(
                 rid=rid,
                 name=name,
@@ -2095,6 +2102,7 @@ class MultiRobotMotrixSim:
                 k1_amp_hist=k1_amp_hist,
                 k1_amp_last_mjcf=k1_amp_last_mjcf,
                 k1_amp_gather_mjcf=k1_amp_gather_mjcf,
+                k1_amp_upper_mjcf=k1_amp_upper_mjcf,
             )
         return specs
 
@@ -2454,7 +2462,9 @@ class MultiRobotMotrixSim:
                     debug_obs = debug_obs_list[i].copy()
                     debug_act = act.copy()
                 if self.robot_cfg.use_k1_amp_onnx:
-                    act_mjcf = act.astype(np.float32, copy=False).reshape(K1_AMP_NUM_ACT)
+                    act_mjcf = act.astype(np.float32, copy=False).reshape(K1_AMP_NUM_ACT).copy()
+                    if spec.k1_amp_upper_mjcf is not None and spec.k1_amp_upper_mjcf.size > 0:
+                        act_mjcf[spec.k1_amp_upper_mjcf] = 0.0
                     if spec.k1_amp_last_mjcf is not None:
                         spec.k1_amp_last_mjcf[:] = act_mjcf
                     pol_to_mjcf = np.asarray(

@@ -254,6 +254,7 @@ K1_AMP_ACTUATOR_JOINT_ORDER = [
     "Right_Ankle_Pitch",
     "Right_Ankle_Roll",
 ]
+K1_AMP_UPPER_BODY_JOINTS = set(K1_AMP_ACTUATOR_JOINT_ORDER[:10])
 K1_AMP_DEFAULT_JOINT_ANGLES = {
     "AAHead_yaw": 0.0,
     "Head_pitch": 0.0,
