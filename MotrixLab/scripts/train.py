@@ -21,7 +21,6 @@ from _source_path import ensure_source_path
 ensure_source_path()
 
 from absl import app, flags
-from skrl import config
 
 from motrix_rl import utils
 
@@ -137,6 +136,7 @@ def main(argv):
     elif train_backend == "jax":
         if _RESUME_POLICY.present or _RESUME_NOISE_STD.present:
             raise Exception("--resume-policy/--resume-noise-std is only supported for --rllib rslrl in this script")
+        from skrl import config
         from motrix_rl.skrl.jax.train import ppo
 
         config.jax.backend = "jax"  # or "numpy"
@@ -145,6 +145,7 @@ def main(argv):
     elif train_backend == "torch":
         if _RESUME_POLICY.present or _RESUME_NOISE_STD.present:
             raise Exception("--resume-policy/--resume-noise-std is only supported for --rllib rslrl in this script")
+        from skrl import config
         from motrix_rl.skrl.torch.train import ppo
 
         trainer = ppo.Trainer(env_name, sim_backend, cfg_override=rl_override, enable_render=enable_render)

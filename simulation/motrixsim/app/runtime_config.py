@@ -582,7 +582,7 @@ def build_robot_runtime_config(
     policy_override: Path | None,
     robot_xml_override: Path | None,
     use_k1_legged_gym: bool = True,
-    k1_policy_flavor: str = K1_POLICY_FLAVOR_LEGGED_GYM,
+    k1_policy_flavor: str = K1_POLICY_FLAVOR_MOTRIXLAB,
 ) -> RobotRuntimeConfig:
     rt = _normalize_robot_type(robot_type)
     if rt == K1_ROBOT_TYPE:
@@ -590,6 +590,7 @@ def build_robot_runtime_config(
             raise ValueError(f"Unsupported K1 policy flavor: {k1_policy_flavor}")
         repo_root = mujoco_dir.parent.parent
         default_pt_policy = mujoco_dir / "assets" / "policies" / "k1_model_46000.pt"
+        default_motrixlab_torch = mujoco_dir / "assets" / "policies" / "k1_walk_model_3600_motrixlab.pt"
         default_legged_onnx_preferred = repo_root / "model_20000_new.onnx"
         default_legged_torch = repo_root / "model_4700.pt"
         default_legged_onnx = repo_root / "legged_gym" / "policy" / "booster_k1" / "model_4700.onnx"
@@ -635,6 +636,8 @@ def build_robot_runtime_config(
         elif want_legged:
             if policy_path is not None:
                 policy_final = policy_path
+            elif default_motrixlab_torch.is_file():
+                policy_final = default_motrixlab_torch
             elif default_legged_onnx_preferred.is_file():
                 policy_final = default_legged_onnx_preferred
                 od = infer_k1_onnx_io(policy_final)
@@ -800,14 +803,15 @@ def parse_runtime_args(mujoco_dir: Path) -> RuntimeArgs:
         default=True,
         help="K1 only (default on): 47-dim obs + 12-dim leg policy for locomotion; "
         "when k1_model_46000.pt is present, standstill uses that full-body policy (78->22) with command hysteresis. "
-        "Default walk policy order: <repo>/model_20000_new.onnx, else model_4700.pt, else legged_gym/.../model_4700.onnx. "
+        "Default walk policy: simulation/motrixsim/assets/policies/k1_walk_model_3600_motrixlab.pt; "
+        "legacy ONNX/TorchScript policies remain available through --policy. "
         "Use --no-k1-legged-gym for legacy k1_model_46000.pt only. "
         "--policy overrides walk policy; .pt files are auto-classified (47->12 legged vs 78->22 full body).",
     )
     parser.add_argument(
         "--k1-policy-flavor",
         choices=K1_POLICY_FLAVORS,
-        default=K1_POLICY_FLAVOR_LEGGED_GYM,
+        default=K1_POLICY_FLAVOR_MOTRIXLAB,
         help="K1 47->12 policy compatibility mode. Use 'motrixlab' for policies trained by "
         "MotrixLab/motrix_envs k1-flat-terrain-walk; keep 'legged_gym' for legacy T1/legged_gym models.",
     )

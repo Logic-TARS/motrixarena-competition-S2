@@ -20,6 +20,10 @@ from motrix_envs import registry
 from motrix_envs.base import EnvCfg
 
 
+REPO_ROOT = Path(__file__).resolve().parents[6]
+K1_ASSET_DIR = REPO_ROOT / "legged_gym" / "resources" / "robots" / "K1"
+
+
 @dataclass
 class ControlConfig:
     stiffness: dict[str, float] = field(
@@ -107,9 +111,10 @@ class Commands:
     vel_limit = [
         [0.35, 0.0, 0.0],
         [0.55, 0.0, 0.0],
+        [0.8, 0.0, 0.0],
     ]
     lin_vel_x = [-1.0, 1.0]
-    lin_vel_y = [-1.0, 1.0]
+    lin_vel_y = [-0.5, 0.5]
     ang_vel_yaw = [-1.0, 1.0]
     resampling_time: float = 10.0
     command_deadzone: float = 0.2
@@ -216,7 +221,7 @@ class RewardConfig:
 @dataclass
 class K1WalkNpEnvCfg(EnvCfg):
     max_episode_seconds: float = 20.0
-    model_file: str = "/opt/sim_soccer2/legged_gym/resources/robots/K1/k1_train_scene.xml"
+    model_file: str = str(K1_ASSET_DIR / "k1_train_scene.xml")
     control_config: ControlConfig = field(default_factory=ControlConfig)
     reward_config: RewardConfig = field(default_factory=RewardConfig)
     init_state: InitState = field(default_factory=InitState)
@@ -305,7 +310,7 @@ class BallRewardConfig(RewardConfig):
 @dataclass
 class K1BallNavigateEnvCfg(EnvCfg):
     max_episode_seconds: float = 20.0
-    model_file: str = "/opt/sim_soccer2/legged_gym/resources/robots/K1/k1_ball_scene.xml"
+    model_file: str = str(K1_ASSET_DIR / "k1_ball_scene.xml")
     control_config: ControlConfig = field(default_factory=ControlConfig)
     reward_config: BallRewardConfig = field(default_factory=BallRewardConfig)
     init_state: InitState = field(default_factory=InitState)
@@ -369,7 +374,7 @@ class PointNavigateRewardConfig(RewardConfig):
 @dataclass
 class K1PointNavigateEnvCfg(EnvCfg):
     max_episode_seconds: float = 20.0
-    model_file: str = "/opt/sim_soccer2/legged_gym/resources/robots/K1/k1_train_scene.xml"
+    model_file: str = str(K1_ASSET_DIR / "k1_train_scene.xml")
     control_config: ControlConfig = field(default_factory=ControlConfig)
     reward_config: PointNavigateRewardConfig = field(default_factory=PointNavigateRewardConfig)
     init_state: InitState = field(default_factory=InitState)
@@ -629,7 +634,7 @@ class AmpSensor:
 @dataclass
 class K1AmpWalkEnvCfg(EnvCfg):
     max_episode_seconds: float = 20.0
-    model_file: str = "/opt/sim_soccer2/legged_gym/resources/robots/K1/K1_22dof.xml"
+    model_file: str = str(K1_ASSET_DIR / "K1_22dof.xml")
     control_config: AmpControlConfig = field(default_factory=AmpControlConfig)
     reward_config: AmpRewardConfig = field(default_factory=AmpRewardConfig)
     init_state: InitState = field(default_factory=InitState)
@@ -804,7 +809,7 @@ class BeyondMimicDomainRand(DomainRand):
 @dataclass
 class K1BeyondMimicMjDance002EnvCfg(EnvCfg):
     max_episode_seconds: float = 10.0
-    model_file: str = "/opt/sim_soccer2/legged_gym/resources/robots/K1/K1_22dof.xml"
+    model_file: str = str(K1_ASSET_DIR / "K1_22dof.xml")
     control_config: AmpControlConfig = field(default_factory=AmpControlConfig)
     reward_config: BeyondMimicRewardConfig = field(default_factory=BeyondMimicRewardConfig)
     init_state: InitState = field(default_factory=InitState)

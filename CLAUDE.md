@@ -45,13 +45,34 @@ Then open `http://127.0.0.1:8000/` to launch simulations.
 
 ### Start Simulation via CLI (no web manager)
 ```bash
-conda run -n motrixsim0508 python simulation/motrixsim/sim2sim_runner.py --team-size 3 --real-time
+# Using the convenience script:
+./scripts/start_sim.sh                          # 1v1, real-time
+./scripts/start_sim.sh --team-size 3             # 3v3
+./scripts/start_sim.sh --policy path/to/model.pt # custom policy
+
+# Or directly:
+PYTHONPATH=simulation/motrixsim:$PYTHONPATH uv run --directory MotrixLab python -u -m app.runner --team-size 1 --real-time
 ```
+**Note:** The real entry point is `simulation/motrixsim/app/runner.py` (imports `parse_runtime_args` + `run_sim`). `sim2sim_runner.py` is a standalone alternative that uses the sim2simlib config path.
+
+Key CLI flags for `runner.py` / `sim2sim_runner.py`:
+- `--robot-type k1|pi_plus` (default: k1)
+- `--team-size N` — robots per team (0-7)
+- `--real-time` / `--no-real-time` — real-time pace vs as-fast-as-possible
+- `--policy PATH` — override policy file (.pt/.onnx)
+- `--k1-policy-flavor motrixlab|legged_gym` — policy compatibility mode (default: `motrixlab`)
+- `--k1-legged-gym` / `--no-k1-legged-gym` — toggle 47→12 legged locomotion policy
+- `--policy-device cpu|gpu` — inference device (default: gpu)
+- `--webview` / `--no-webview` — enable/disable WebView streaming
 
 ### Start a Single Decider
 ```bash
-conda activate k2
-python decider/decider.py --simulation --ip 127.0.0.1 --port 5555 --color red --id 0
+# Using the convenience script:
+./scripts/start_decider.sh                              # red, id=0
+./scripts/start_decider.sh --color blue --id 0 --port 5556
+
+# Or directly:
+PYTHONPATH=decider:$PYTHONPATH uv run --directory MotrixLab python -u decider/decider.py --simulation --ip 127.0.0.1 --port 5555 --color red --id 0
 ```
 
 ### Start a Full Team
@@ -77,6 +98,29 @@ uv run pytest                                  # run tests
 
 Available K1 environment names: `k1-flat-terrain-walk`, `k1-point-navigation`, `k1-ball-navigation`, `k1-amp-walk`, `k1-amp-walk-small`, `k1-amp-walk-lift`.
 
+**Important `train.py` flags:**
+- `--rllib skrl|rslrl` — RL framework (default: `skrl`). RSLRL is required for K1 walk training.
+- `--num-envs N` — vectorized environments (default: 2048; K1 walk uses 4096)
+- `--resume-policy PATH` — resume training from a checkpoint (RSLRL only)
+- `--resume-noise-std FLOAT` — reset exploration noise when resuming (RSLRL only)
+- `--max-iterations N` — override the config's iteration count
+- `--train-backend jax|torch` — backend override (auto-detected by default)
+
+### K1 Walk Training (via shell wrapper)
+```bash
+cd MotrixLab
+bash scripts/train_k1.sh                          # RSLRL, 4096 envs, seed 1
+bash scripts/train_k1.sh --resume-policy PATH     # resume from checkpoint
+```
+The wrapper sets `CUDA_VISIBLE_DEVICES=0`, syncs RSLRL extras, and runs `train.py --env k1-flat-terrain-walk --rllib rslrl --num-envs 4096 --seed 1`.
+
+### Playing / Evaluating Policies
+```bash
+uv run scripts/play.py --env cartpole
+uv run scripts/play.py --env cartpole --policy path/to/model_3600.pt --rllib rslrl
+```
+With no `--policy` or `--rllib`, `play.py` **auto-discovers** the most recent training run under `runs/{env}/` and picks its best checkpoint.
+
 ### K1 Locomotion Smoke Test
 ```bash
 cd MotrixLab
@@ -97,8 +141,11 @@ conda run -n sim_soccer_rl env PYTHONPATH=./motrix_envs/src:./motrix_rl/src pyth
 - **Team launch**: `scripts/start_team.sh` — uses `screen` sessions per robot.
 
 ### Simulation (`simulation/`)
-- **motrixsim/** — Primary engine. Key files:
-  - `sim2sim_runner.py` — CLI binary that starts a K1/Pi+ soccer sim instance
+- **motrixsim/** — Primary engine:
+  - `app/runner.py` — **real CLI entry point**; imports `parse_runtime_args` + `run_sim`
+  - `app/runtime_config.py` — all K1/Pi+ robot constants (joint orders, PD gains, action scales, obs configs), `RobotRuntimeConfig` dataclass, `build_robot_runtime_config()`, and `parse_runtime_args()` — the single source of truth for robot simulation configuration
+  - `app/multi_robot_sim.py` — main simulation loop, policy inference, ZMQ communication, K1 policy mixing/AMP logic
+  - `sim2sim_runner.py` — standalone alternative CLI using sim2simlib config path (legacy)
   - `soccer_env.py` — Gymnasium-style env wrapper (`MotrixSoccerSim`)
 - **labbridge/** — Sim Manager (FastAPI web app) and WebView server:
   - `sim_manager.py` / `sim_manager2.py` — web dashboard for managing sim processes
@@ -159,11 +206,21 @@ agent.state_machine_runners['goalkeeper']()
 - Decider uses Python 3.8 (old). Don't introduce syntax/features incompatible with 3.8.
 - The `legged_gym/` directory is a detached copy of another project — treat as reference only. **Do not move or delete it** — training configs hardcode paths like `legged_gym/resources/robots/K1/k1_train_scene.xml` and `legged_gym/policy/booster_k1/model_4700.onnx`.
 - Root-level model files (`model_20000_new.onnx`, `model_4700.pt`) are default policy paths referenced by runtime configs — do not remove.
-- `config.yaml` is the single source of truth for tunable parameters; avoid hardcoding magic numbers in strategy code. Optional `config_override.json/yaml/yml` files are deep-merged on top at load time.
-- Field size presets: S = 9x6m, M = 14x9m, L = 22x14m (configured via `config.yaml` league field).
+- `config.yaml` is the single source of truth for tunable parameters; avoid hardcoding magic numbers in strategy code. Optional `config_override.json/yaml/yml` files (in `decider/`) are deep-merged on top at load time via `decider/configuration.py`. Override files support JSON-with-comments (`//` and `/* */`).
+- Field size presets: S = 9×6m, M = 14×9m, L = 22×14m (configured via `config.yaml` league field).
 
-### K1 Policy Mixing (sim2sim_runner.py)
-When the leg-control policy (`model_4700.pt`, 47→12) is active and `assets/policies/k1_model_46000.pt` exists, `sim2sim_runner.py` auto-mixes: small velocity commands use the 46000 full-body policy (standing/upper-body posture), while larger commands switch to the 4700 leg-control policy (with hysteresis to avoid oscillation). Disable with `--no-k1-legged-gym`.
+### K1 Policy Flavor System
+`simulation/motrixsim/app/runtime_config.py` defines two K1 policy compatibility modes for 47→12 legged locomotion policies:
+- **`motrixlab`** (default) — policies trained by MotrixLab/motrix_envs `k1-flat-terrain-walk`. Uses MotrixLab-specific observation scales, action scales, PD gains, and torque limits (see `K1_MOTRIXLAB_*` constants).
+- **`legged_gym`** — legacy policies trained by legged_gym (T1/T1_config.py). Uses different scaling/PD constants (see `K1_LEGGED_GYM_*` constants).
+
+Select with `--k1-policy-flavor motrixlab|legged_gym`. The default walk policy is `simulation/motrixsim/assets/policies/k1_walk_model_3600_motrixlab.pt`.
+
+### K1 Policy Mixing (runtime_config.py)
+When the leg-control policy (47→12) is active and a full-body stand policy (`k1_model_46000.pt`, 78→22) exists, the runner auto-mixes: small velocity commands use the 78→22 full-body policy (standing/upper-body posture), while larger commands switch to the 47→12 leg-control policy (with hysteresis to avoid oscillation). Disable with `--no-k1-legged-gym`.
+
+### MotrixLab Source Path Pattern
+All MotrixLab scripts use `from _source_path import ensure_source_path; ensure_source_path()` to add `motrix_envs/src` and `motrix_rl/src` to `sys.path` before any other imports. This pattern is required whenever running scripts from within the MotrixLab directory.
 
 ### Multi-Agent Strategy (WIP)
 `decider/strategy/team_manager.py` implements a multi-agent coordination system (role assignment, world model fusion) — intended architecture for team play, currently work-in-progress.

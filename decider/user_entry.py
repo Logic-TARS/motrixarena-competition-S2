@@ -489,8 +489,8 @@ def _simple_sim_chase(agent, ball_dist: float) -> None:
 
     Computes body-frame navigation commands from ball position (heading + distance),
     matching the training-time _compute_commands logic:
-      cmd_vx = clip(0.45 * dist, 0, 0.55)
-      cmd_wz = clip(1.2 * heading, -0.8, 0.8)
+      cmd_vx = clip(0.45 * dist, 0, 0.8)
+      cmd_wz = clip(1.2 * heading, -1.0, 1.0)
     """
     import sys
     logger = agent.get_logger()
@@ -507,9 +507,9 @@ def _simple_sim_chase(agent, ball_dist: float) -> None:
     if ball_dist < 0.35:
         cmd_x, cmd_y, cmd_w = 0.0, 0.0, 0.0
     else:
-        cmd_x = float(np.clip(0.45 * ball_dist, 0.0, 0.55))
+        cmd_x = float(np.clip(0.45 * ball_dist, 0.0, 0.8))
         cmd_y = 0.0
-        cmd_w = float(np.clip(1.2 * ball_angle, -0.8, 0.8))
+        cmd_w = float(np.clip(1.2 * ball_angle, -1.0, 1.0))
 
     logger.info(
         f"[SIM_CHASE] ball=({ball_x:.2f},{ball_y:.2f}) dist={ball_dist:.2f} "
