@@ -5,11 +5,13 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import socket
 import sys
 import tempfile
 import time
+from datetime import datetime
 import types
 from copy import deepcopy
 from dataclasses import dataclass
@@ -1413,10 +1415,11 @@ PI_PLUS_DEFAULT_DOF_POS_MUJOCO = np.asarray(
 )
 
 # K1 walk/stand hybrid: body-frame command (vx, vy, yaw rate) gates legged vs full-body policy.
-K1_HYBRID_WALK_ENTER_LIN = 0.07
-K1_HYBRID_WALK_EXIT_LIN = 0.035
-K1_HYBRID_WALK_ENTER_YAW = 0.18
-K1_HYBRID_WALK_EXIT_YAW = 0.07
+# Lowered from (0.07,0.035,0.18,0.07) to reduce stand-policy latency at low speeds.
+K1_HYBRID_WALK_ENTER_LIN = 0.04
+K1_HYBRID_WALK_EXIT_LIN = 0.02
+K1_HYBRID_WALK_ENTER_YAW = 0.10
+K1_HYBRID_WALK_EXIT_YAW = 0.04
 
 
 @dataclass
@@ -1515,9 +1518,12 @@ class MultiRobotMotrixSim:
         )
 
         self.model = mtx.load_model(str(scene_xml))
+        # Override MJCF timestep to match the MotrixLab training environment
+        # (MotrixLab sets model.options.timestep = cfg.sim_dt = 0.002 in env.py).
+        # Without this, the policy runs at 250 Hz instead of the trained 50 Hz,
+        # and the gait phase clock drifts to ~24 % of the expected rate.
+        self.model.options.timestep = 0.002
         self.data = mtx.SceneData(self.model, batch=[1])
-        # Keep physics coefficients aligned with MuJoCo source scene (world.xml),
-        # including timestep/options loaded in the model.
         self.sim_dt = float(self.model.options.timestep)
         self.control_decimation = int(self.robot_cfg.control_decimation)
 
@@ -3196,6 +3202,28 @@ class MultiRobotMotrixSim:
         img[max(0, ya) : min(h, yb + 1), max(0, xa) : min(w, xa + 2)] = 230
         img[max(0, ya) : min(h, yb + 1), max(0, xb - 1) : min(w, xb + 1)] = 230
 
+        # Draw goals at both ends of the field.
+        goal_half_w = 0.5 * float(getattr(self, "_goal_width", 1.9))
+        goal_depth = 1.0  # metres
+        _white = np.array([230, 230, 230], dtype=np.uint8)
+        for goal_x_sign in (-1, 1):
+            gx0, gy0 = to_px(goal_x_sign * half_l, goal_half_w)
+            gx1, gy1 = to_px(goal_x_sign * (half_l + goal_depth), -goal_half_w)
+            gxa, gxb = sorted((gx0, gx1))
+            gya, gyb = sorted((gy0, gy1))
+            # goal net area (slightly darker than lines)
+            gy_inner_a = gya + 2
+            gy_inner_b = gyb - 2
+            gx_inner_a = gxa + 2
+            gx_inner_b = gxb - 2
+            if gy_inner_a < gy_inner_b and gx_inner_a < gx_inner_b:
+                img[max(0, gy_inner_a):min(h, gy_inner_b + 1),
+                    max(0, gx_inner_a):min(w, gx_inner_b + 1)] = np.array([180, 180, 180], dtype=np.uint8)
+            # goal frame (top / bottom / back edges)
+            img[max(0, gya):min(h, gya + 2), max(0, gxa):min(w, gxb + 1)] = _white
+            img[max(0, gyb - 1):min(h, gyb + 1), max(0, gxa):min(w, gxb + 1)] = _white
+            img[max(0, gya):min(h, gyb + 1), max(0, gxb - 1):min(w, gxb + 1)] = _white
+
         states = self.state_for_web()
         ball = states.get("ball", {})
         bx, by = to_px(float(ball.get("x", 0.0)), float(ball.get("y", 0.0)))
@@ -3383,7 +3411,8 @@ class MultiRobotMotrixSim:
         elif cmd == "stoptimer":
             self.referee.set_auto_state_enabled(False)
 
-    def zmq_loop(self, port: int, webview: MujocoLabWebView | None, web_fps: int, width: int, height: int):
+    def zmq_loop(self, port: int, webview: MujocoLabWebView | None, web_fps: int, width: int, height: int,
+                 record_video_dir: str | None = None):
         context = zmq.Context()
         socket = context.socket(zmq.REP)
         socket.bind(f"tcp://*:{port}")
@@ -3391,6 +3420,13 @@ class MultiRobotMotrixSim:
         use_real_time = bool(self.args.real_time or (webview is not None))
         if webview is not None and not self.args.real_time:
             print("[MotrixWebView] forcing real-time stepping for web responsiveness")
+
+        record_counter = 0
+        record_interval = 1.0 / 30.0  # 30 fps recording
+        next_record_time = time.time()
+        if record_video_dir is not None:
+            os.makedirs(record_video_dir, exist_ok=True)
+            print(f"[MotrixRecord] Saving frames to {record_video_dir} at 30 fps")
 
         renderer = None
         frame_interval = 1.0 / max(1, web_fps)
@@ -3470,6 +3506,37 @@ class MultiRobotMotrixSim:
                         webview.emit_robot_states(self.state_for_web())
                         next_state_emit_time = now + state_emit_interval
 
+                if record_video_dir is not None:
+                    now = time.time()
+                    if now >= next_record_time:
+                        try:
+                            from PIL import Image, ImageDraw, ImageFont
+                        except ImportError:
+                            print("[MotrixRecord] pillow not installed. Run: pip install pillow")
+                            record_video_dir = None
+                        else:
+                            try:
+                                frame = self._render_topdown_web_frame(width, height)
+                                img = Image.fromarray(frame)
+                                draw = ImageDraw.Draw(img)
+                                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                try:
+                                    font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 18)
+                                except Exception:
+                                    font = ImageFont.load_default()
+                                bbox = draw.textbbox((0, 0), ts, font=font)
+                                tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+                                pad = 6
+                                draw.rectangle([(0, 0), (tw + pad * 2, th + pad * 2)], fill=(0, 0, 0, 180))
+                                draw.text((pad, pad), ts, fill=(255, 255, 255), font=font)
+                                fpath = os.path.join(record_video_dir, f"frame_{record_counter:06d}.png")
+                                img.save(fpath)
+                                record_counter += 1
+                                next_record_time = now + record_interval
+                            except Exception as e:
+                                print(f"[MotrixRecord] frame save error: {e}")
+                                record_video_dir = None
+
                 if use_real_time:
                     wait_time = float(self.model.options.timestep) - (time.time() - step_start)
                     if wait_time > 0:
@@ -3541,6 +3608,7 @@ def run_sim(args: RuntimeArgs, template_dir: Path):
             web_fps=args.web_fps,
             width=args.web_width,
             height=args.web_height,
+            record_video_dir=args.record_video,
         )
     finally:
         if webview is not None:

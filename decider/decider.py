@@ -82,7 +82,7 @@ class Agent(Node):
         if vel_theta > 0.001:
             vel_theta += self._config.get("min_walk_vel_theta", 0.3)
         elif vel_theta < -0.001:
-            vel_theta -= self._config.get("min_walk_vel_thetea", 0.3)
+            vel_theta -= self._config.get("min_walk_vel_theta", 0.3)
         vel_x = float(np.clip(vel_x, -1.0, 1.0))
         vel_y = float(np.clip(vel_y, -1.0, 1.0))
         vel_theta = float(np.clip(vel_theta, -1.0, 1.0))

@@ -493,6 +493,7 @@ class RuntimeArgs:
     use_referee: bool
     policy_device: str
     real_time: bool
+    record_video: str | None = None
 
 
 def _clamp_team_count(v: int) -> int:
@@ -691,8 +692,8 @@ def build_robot_runtime_config(
             obs_scale=OBS_SCALE,
             cmd_clip=None,
             base_joint_name="world_joint",
-            sim_dt=0.005,
-            control_decimation=4,
+            sim_dt=0.002,
+            control_decimation=10,  # 0.002 * 10 = 0.02 s = 50 Hz, matches training ctrl_dt
             use_k1_legged_gym_policy=want_legged and not use_k1_amp_onnx,
             k1_stand_policy=None if use_k1_amp_onnx else k1_stand_policy,
             use_k1_amp_onnx=use_k1_amp_onnx,
@@ -815,7 +816,17 @@ def parse_runtime_args(mujoco_dir: Path) -> RuntimeArgs:
         help="K1 47->12 policy compatibility mode. Use 'motrixlab' for policies trained by "
         "MotrixLab/motrix_envs k1-flat-terrain-walk; keep 'legged_gym' for legacy T1/legged_gym models.",
     )
+    parser.add_argument(
+        "--record-video",
+        type=str,
+        default=None,
+        help="Save top-down frames to DIR at 30 fps (implies --no-webview --no-real-time). "
+        "Combine with: ffmpeg -framerate 30 -i DIR/frame_%%06d.png -c:v libx264 output.mp4",
+    )
     ns = parser.parse_args()
+    if ns.record_video:
+        ns.webview = False
+        ns.real_time = False
     team_size = _clamp_team_count(ns.team_size)
     robot_cfg = build_robot_runtime_config(
         mujoco_dir,
@@ -849,6 +860,7 @@ def parse_runtime_args(mujoco_dir: Path) -> RuntimeArgs:
         use_referee=ns.use_referee,
         policy_device=ns.policy_device,
         real_time=ns.real_time,
+        record_video=ns.record_video,
     )
 
 

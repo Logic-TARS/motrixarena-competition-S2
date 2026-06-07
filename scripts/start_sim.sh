@@ -10,12 +10,14 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TEAM_SIZE="${TEAM_SIZE:-1}"
 REAL_TIME="--real-time"
 POLICY_ARG=""
+RECORD_ARG=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --team-size) TEAM_SIZE="$2"; shift 2 ;;
         --no-real-time) REAL_TIME="--no-real-time"; shift ;;
         --policy) POLICY_ARG="--policy $2"; shift 2 ;;
+        --record-video) RECORD_ARG="--record-video $2"; shift 2 ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
@@ -44,4 +46,5 @@ echo ""
 exec uv run --directory "$REPO_ROOT/MotrixLab" python -u -m app.runner \
     --team-size "$TEAM_SIZE" \
     $REAL_TIME \
-    $POLICY_ARG
+    $POLICY_ARG \
+    $RECORD_ARG

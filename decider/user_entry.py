@@ -291,7 +291,7 @@ class AdvancedDribbler:
              target_dist = self.setup_dist - ratio * (self.setup_dist - self.dribble_dist)
 
         err_x = b_x_virt - target_dist
-        
+
         # Velocity Damping (Anti-Oscillation)
         # Don't rush if not aligned
         forward_factor = 1.0
@@ -309,7 +309,7 @@ class AdvancedDribbler:
             forward_factor = max(forward_factor, 0.8)  # At least 80% power near goal
             
         cmd_x_virt = self.forward_p * err_x * forward_factor
-        
+
         # [NEW] Minimum Push Velocity when Aligned
         # Always maintain minimum forward velocity when aligned (PUSH mode)
         if aligned:
@@ -383,6 +383,99 @@ class AdvancedDribbler:
         self.agent.cmd_vel(cmd_x, cmd_y, da)
         self.agent.move_head(math.inf, math.inf)
 
+
+class PushToGoalController:
+    """Stay behind the ball (relative to opponent goal) and push it forward.
+
+    Single unified behaviour — no SETUP/PUSH mode switching.
+    Always targets a position ~12 cm behind the ball so the robot
+    naturally pushes the ball toward the opponent goal.
+    """
+
+    def __init__(self, agent):
+        self.agent = agent
+        self.logger = agent.get_logger().get_child("PushToGoal")
+
+        config = agent.get_config()
+        league = config.get("league", "M")
+        field_dims = config.get("field_size", {}).get(league, [14.0, 9.0])
+        self.field_length = float(field_dims[0])
+
+        # Tunable parameters
+        self.push_dist = 0.12       # target distance behind the ball (m)
+        self.kp_pos = 2.5           # position P-gain
+        self.kp_yaw = 2.5           # yaw P-gain
+        self.max_vel = 1.0          # max linear speed (m/s)
+        self.max_yaw = 2.5          # max angular speed (rad/s)
+        self.kick_dist = 0.3        # distance to goal to trigger kick (m)
+
+    def run(self):
+        # 1. No ball – stop and let find_ball takeover
+        if not self.agent.get_if_ball():
+            self.logger.info("[PushToGoal] No ball.")
+            self.agent.cmd_vel(0, 0, 0)
+            return
+
+        # 2. World-frame positions
+        ball_w = self.agent.get_ball_pos_in_map()   # [x, y]
+        robot_w = self.agent.get_self_pos()          # [x, y]
+        robot_yaw_deg = self.agent.get_self_yaw()    # degrees
+        robot_yaw_rad = math.radians(robot_yaw_deg)
+
+        # Guard against None
+        if ball_w is None or robot_w is None or ball_w[0] is None or robot_w[0] is None:
+            self.logger.warning("[PushToGoal] Bad position data, stopping.")
+            self.agent.cmd_vel(0, 0, 0)
+            return
+
+        goal = np.array([self.field_length / 2.0, 0.0])
+        ball_w = np.array(ball_w, dtype=float)
+        robot_w = np.array(robot_w, dtype=float)
+
+        # 3. Direction from ball to goal
+        to_goal = goal - ball_w
+        dist_to_goal = float(np.linalg.norm(to_goal))
+        if dist_to_goal < 0.01:
+            to_goal = np.array([1.0, 0.0])  # fallback
+        else:
+            to_goal = to_goal / dist_to_goal
+
+        # 4. Target position: behind ball, opposite to goal direction
+        target_pos = ball_w - to_goal * self.push_dist
+
+        # 5. Position error (world frame → body frame)
+        err_world = target_pos - robot_w
+        c = math.cos(robot_yaw_rad)
+        s = math.sin(robot_yaw_rad)
+        err_body_x = err_world[0] * c + err_world[1] * s
+        err_body_y = -err_world[0] * s + err_world[1] * c
+
+        # 6. Yaw error: face the goal
+        target_yaw = math.atan2(goal[1] - robot_w[1], goal[0] - robot_w[0])
+        yaw_err = self.agent.angle_normalize(target_yaw - robot_yaw_rad)
+
+        # 7. P-control
+        cmd_x = float(np.clip(self.kp_pos * err_body_x, -self.max_vel, self.max_vel))
+        cmd_y = float(np.clip(self.kp_pos * err_body_y, -self.max_vel, self.max_vel))
+        cmd_w = float(np.clip(self.kp_yaw * yaw_err, -self.max_yaw, self.max_yaw))
+
+        # 8. Kick when close to opponent goal and ball is in front
+        ball_dist = self.agent.get_ball_distance()
+        ball_pos = self.agent.get_ball_pos()
+        near_goal = dist_to_goal < 2.0 or robot_w[0] > self.field_length * 0.35
+        if near_goal and ball_pos[0] is not None and ball_pos[0] > 0.05 and ball_dist < 0.35:
+            self.logger.info(f"[PushToGoal] KICK near goal! dist_to_goal={dist_to_goal:.2f}")
+            self.agent.kick(foot=0, death=0)
+
+        self.logger.info(
+            f"[PushToGoal] err_body=({err_body_x:.2f},{err_body_y:.2f}) "
+            f"yaw_err={math.degrees(yaw_err):.1f}deg "
+            f"cmd=({cmd_x:.2f},{cmd_y:.2f},{cmd_w:.2f})"
+        )
+        self.agent.cmd_vel(cmd_x, cmd_y, cmd_w)
+        self.agent.move_head(math.inf, math.inf)
+
+
 def init(agent) -> None:
     agent.get_logger().info("[UserEntry] Initializing Logic...")
     
@@ -395,6 +488,9 @@ def init(agent) -> None:
     
     # Initialize Advanced Dribbler
     agent.adv_dribbler = AdvancedDribbler(agent)
+
+    # Initialize Push-to-Goal controller
+    agent.push_to_goal = PushToGoalController(agent)
 
     agent.state_machine_runners = {
         "chase_ball": agent.chase_ball_machine.run,
@@ -421,9 +517,10 @@ def loop(agent) -> None:
 
 def game(agent) -> None:
     if getattr(agent, "is_simulation", False):
-        with open("/tmp/game_trace.txt", "a") as f:
-            f.write("game() called, has_ball=%s\n" % agent.get_if_ball())
-        _simple_sim_chase(agent, agent.get_ball_distance())
+        if not agent.get_if_ball():
+            agent.state_machine_runners["find_ball"]()
+        else:
+            agent.push_to_goal.run()
         return
     
     # --- Select Test to Run ---
