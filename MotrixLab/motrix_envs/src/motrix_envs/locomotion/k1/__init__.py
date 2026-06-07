@@ -14,26 +14,12 @@
 # ==============================================================================
 
 from . import (
-    beyond_mimic,  # noqa: F401 register envs
-    walk_amp,  # noqa: F401 register envs
     walk_np,  # noqa: F401 register envs
 )
 from .cfg import (  # noqa: F401
-    K1BeyondMimicMjDance002EnvCfg,
-    K1AmpStandEnvCfg,
-    K1AmpWalkEnvCfg,
-    K1AmpWalkLiftEnvCfg,
-    K1AmpWalkSmallEnvCfg,
-    K1MjDance002EnvCfg,
     K1WalkNpEnvCfg,
 )
 
 __all__ = [
-    "K1AmpStandEnvCfg",
-    "K1AmpWalkEnvCfg",
-    "K1AmpWalkLiftEnvCfg",
-    "K1AmpWalkSmallEnvCfg",
-    "K1BeyondMimicMjDance002EnvCfg",
-    "K1MjDance002EnvCfg",
     "K1WalkNpEnvCfg",
 ]

@@ -18,7 +18,7 @@ import motrixsim as mtx
 import numpy as np
 
 from motrix_envs import registry
-from motrix_envs.locomotion.k1.cfg import K1BallNavigateEnvCfg, K1PointNavigateEnvCfg, K1WalkNpEnvCfg
+from motrix_envs.locomotion.k1.cfg import K1WalkNpEnvCfg
 from motrix_envs.math import quaternion
 from motrix_envs.np.env import NpEnv, NpEnvState
 
@@ -76,9 +76,7 @@ class K1WalkTask(NpEnv):
 
     def _init_buffer(self):
         cfg = self._cfg
-        from motrix_envs.locomotion.k1.cfg import K1BallNavigateEnvCfg, K1PointNavigateEnvCfg  # noqa: F811
-
-        assert isinstance(cfg, (K1WalkNpEnvCfg, K1BallNavigateEnvCfg, K1PointNavigateEnvCfg))
+        assert isinstance(cfg, K1WalkNpEnvCfg)
 
         self.gravity_vec = np.array([0, 0, -1], dtype=np.float32)
         self.commands_scale = np.array(
@@ -599,141 +597,3 @@ class K1WalkTask(NpEnv):
         left_vel = self._average_geom_vector(self._left_foot_geoms, data, "get_linear_velocity")
         right_vel = self._average_geom_vector(self._right_foot_geoms, data, "get_linear_velocity")
         return np.stack([left_vel, right_vel], axis=1).astype(np.float32)
-
-
-@registry.env("k1-point-navigate", sim_backend="np")
-class K1PointNavigateTask(K1WalkTask):
-    """Point-to-point navigation: robot learns to walk to a target position using
-    body-frame velocity commands computed from target heading + distance."""
-
-    def __init__(self, cfg: K1PointNavigateEnvCfg, num_envs=1):
-        super().__init__(cfg, num_envs)
-        self._pcfg = cfg.point_config
-
-    def reset(self, data) -> tuple[np.ndarray, dict]:
-        obs, info = super().reset(data)
-        new_targets = self._spawn_targets(data)
-        info["target_pos"] = new_targets
-        info["arrived"] = np.zeros(data.shape[0], dtype=bool)
-        info["prev_target_dist"] = np.linalg.norm(
-            new_targets - self._body.get_pose(data)[:, :2], axis=1
-        ).astype(np.float32)
-        return obs, info
-
-    def _spawn_targets(self, data) -> np.ndarray:
-        pose = self._body.get_pose(data)
-        quat = pose[:, 3:7]
-        yaw = _quat_to_yaw(quat)
-        n = data.shape[0]
-        dist = np.random.uniform(self._pcfg.spawn_dist_min, self._pcfg.spawn_dist_max, size=n)
-        angle_offset = np.random.uniform(-self._pcfg.spawn_angle_max, self._pcfg.spawn_angle_max, size=n)
-        target_angle = yaw + angle_offset.astype(np.float32)
-        targets = np.zeros((n, 2), dtype=np.float32)
-        targets[:, 0] = pose[:, 0] + dist * np.cos(target_angle)
-        targets[:, 1] = pose[:, 1] + dist * np.sin(target_angle)
-        return targets
-
-    def _compute_commands(self, data, info) -> np.ndarray:
-        pose = self._body.get_pose(data)
-        quat = pose[:, 3:7]
-        yaw = _quat_to_yaw(quat)
-        rel = info["target_pos"] - pose[:, :2]
-        dist = np.linalg.norm(rel, axis=1)
-        cos_y = np.cos(yaw)
-        sin_y = np.sin(yaw)
-        target_forward = rel[:, 0] * cos_y + rel[:, 1] * sin_y
-        target_left = -rel[:, 0] * sin_y + rel[:, 1] * cos_y
-        heading = np.arctan2(target_left, target_forward)
-
-        cmd_vx = np.clip(self._pcfg.command_forward_gain * dist, 0.0, self._pcfg.command_max_forward_vel)
-        cmd_wz = np.clip(self._pcfg.command_turn_gain * heading, -self._pcfg.command_max_yaw_rate, self._pcfg.command_max_yaw_rate)
-        cmd_vy = np.zeros_like(cmd_vx)
-        return np.stack([cmd_vx, cmd_vy, cmd_wz], axis=1).astype(np.float32)
-
-    def apply_action(self, actions, state):
-        if actions.ndim == 1:
-            actions = np.tile(actions, (self._num_envs, 1))
-        actions = np.clip(actions, self._action_space.low, self._action_space.high).astype(np.float32)
-        state.info["last_dof_vel"] = self.get_dof_vel(state.data)
-        state.info["last_actions"] = state.info["current_actions"]
-        state.info["current_actions"] = actions
-        state.info["episode_length"] = state.info.get(
-            "episode_length", np.zeros((self._num_envs,), dtype=np.int32)
-        ) + 1
-        state.info["gait_phase"] = np.fmod(
-            state.info["episode_length"] * self.cfg.ctrl_dt / self.cfg.commands.phase_period,
-            1.0,
-        ).astype(np.float32)
-        state.info["commands"] = self._compute_commands(state.data, state.info)
-        state.data.actuator_ctrls = self._compute_torques(actions, state.data)
-        return state
-
-    def update_terminated(self, state: NpEnvState) -> NpEnvState:
-        state = super().update_terminated(state)
-        pose = self._body.get_pose(state.data)
-        dist = np.linalg.norm(state.info["target_pos"] - pose[:, :2], axis=1)
-        speed = np.linalg.norm(self.get_local_linvel(state.data)[:, :2], axis=1)
-        arrived = (dist < self._pcfg.arrival_radius) & (speed < self._pcfg.stop_speed_threshold)
-        state.info["arrived"] = arrived
-        return state.replace(terminated=state.terminated | arrived)
-
-    def _get_reward(self, data: mtx.SceneData, info: dict) -> dict[str, np.ndarray]:
-        result = super()._get_reward(data, info)
-        commands = info["commands"]
-        result["progress_to_target"] = self._reward_progress_to_target(data, info)
-        result["heading_to_target"] = self._reward_heading_to_target(data, commands)
-        result["low_speed_penalty"] = self._reward_low_speed(data, commands)
-        result["arrival"] = self._reward_arrival(data, info)
-        result["arrival_bonus"] = self._reward_arrival_bonus(data, info)
-        result["stop_at_target"] = self._reward_stop_at_target(data, commands, info)
-        result["command_forward_vel"] = self._reward_command_forward_vel(data, commands)
-        result["overspeed"] = self._reward_overspeed(data, commands)
-        result["straight_motion"] = self._reward_straight_motion(data, commands)
-        result["joint_regularization"] = self._reward_joint_regularization(data)
-        return result
-
-    def _reward_progress_to_target(self, data, info):
-        pose = self._body.get_pose(data)
-        dist = np.linalg.norm(info["target_pos"] - pose[:, :2], axis=1)
-        progress = info["prev_target_dist"] - dist
-        info["prev_target_dist"] = dist.copy()
-        return np.clip(progress, -0.5, 0.5).astype(np.float32)
-
-    def _reward_heading_to_target(self, data, commands):
-        linvel = self.get_local_linvel(data)
-        cmd_dir = commands[:, :2].copy()
-        cmd_norm = np.linalg.norm(cmd_dir, axis=1, keepdims=True)
-        cmd_norm = np.where(cmd_norm > 1e-6, cmd_norm, 1.0)
-        cmd_dir = cmd_dir / cmd_norm
-        vel_norm = np.linalg.norm(linvel[:, :2], axis=1, keepdims=True)
-        dot = np.sum(linvel[:, :2] * cmd_dir, axis=1) / np.where(vel_norm[:, 0] > 1e-6, vel_norm[:, 0], 1.0)
-        return np.clip(dot, -1.0, 1.0).astype(np.float32)
-
-    def _reward_low_speed(self, data, commands):
-        cmd_speed = np.linalg.norm(commands[:, :2], axis=1)
-        actual_speed = np.linalg.norm(self.get_local_linvel(data)[:, :2], axis=1)
-        return ((cmd_speed > 0.2) & (actual_speed < 0.08)).astype(np.float32)
-
-    def _reward_arrival(self, data, info):
-        pose = self._body.get_pose(data)
-        dist = np.linalg.norm(info["target_pos"] - pose[:, :2], axis=1)
-        speed = np.linalg.norm(self.get_local_linvel(data)[:, :2], axis=1)
-        return ((dist < self._pcfg.arrival_radius) & (speed < self._pcfg.stop_speed_threshold)).astype(np.float32)
-
-    def _reward_arrival_bonus(self, data, info):
-        return self._reward_arrival(data, info)
-
-    def _reward_stop_at_target(self, data, commands, info):
-        pose = self._body.get_pose(data)
-        dist = np.linalg.norm(info["target_pos"] - pose[:, :2], axis=1)
-        speed = np.linalg.norm(self.get_local_linvel(data)[:, :2], axis=1)
-        cmd_speed = np.linalg.norm(commands[:, :2], axis=1)
-        return ((dist < self._pcfg.arrival_radius) & (cmd_speed < 0.05) & (speed < self._pcfg.stop_speed_threshold)).astype(np.float32)
-
-
-def _quat_to_yaw(quat: np.ndarray) -> np.ndarray:
-    """Convert quaternion (x, y, z, w) to yaw angle."""
-    x, y, z, w = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
-    siny_cosp = 2.0 * (w * z + x * y)
-    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
-    return np.arctan2(siny_cosp, cosy_cosp).astype(np.float32)

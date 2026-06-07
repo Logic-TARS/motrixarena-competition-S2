@@ -46,15 +46,8 @@ def main() -> None:
 
     obs_dim = env.observation_space.shape[0]
     act_dim = env.action_space.shape[0]
-    if args.env in ("k1-beyond-mimic-mj-dance-002", "k1-mj-dance-002"):
-        expected_obs = 119
-        expected_act = 22
-    elif args.env.startswith("k1-amp"):
-        expected_obs = 375
-        expected_act = 22
-    else:
-        expected_obs = 47
-        expected_act = 12
+    expected_obs = 47
+    expected_act = 12
     if obs_dim != expected_obs or act_dim != expected_act:
         raise AssertionError(f"Expected {expected_obs}->{expected_act}, got {obs_dim}->{act_dim}")
 
