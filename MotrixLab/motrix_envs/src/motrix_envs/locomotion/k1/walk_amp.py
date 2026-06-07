@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 @registry.env("k1-amp-walk", sim_backend="np")
 @registry.env("k1-amp-stand", sim_backend="np")
 @registry.env("k1-amp-walk-small", sim_backend="np")
+@registry.env("k1-amp-walk-lift", sim_backend="np")
 class K1AmpWalkTask(NpEnv):
     def __init__(self, cfg: K1AmpWalkEnvCfg, num_envs=1):
         super().__init__(cfg, num_envs)
@@ -679,8 +680,8 @@ class K1AmpWalkTask(NpEnv):
     def _reward_feet_air_time(self, commands: np.ndarray, info: dict):
         feet_air_time = info["feet_air_time"]
         first_contact = (feet_air_time > 0.0) * info["contacts"]
-        rew_air_time = np.sum((feet_air_time - 0.5) * first_contact, axis=1)
-        rew_air_time *= np.linalg.norm(commands[:, :2], axis=1) > 0.1
+        rew_air_time = np.sum((feet_air_time - self.cfg.reward_config.target_feet_air_time) * first_contact, axis=1)
+        rew_air_time *= np.linalg.norm(commands[:, :2], axis=1) > self.cfg.commands.command_deadzone
         return rew_air_time
 
     def _reward_collision(self, data: mtx.SceneData):

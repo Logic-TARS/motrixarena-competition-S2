@@ -19,9 +19,9 @@ from _source_path import ensure_source_path
 
 ensure_source_path()
 
-import numpy as np
+import numpy as np  # noqa: E402
 
-from motrix_envs import registry
+from motrix_envs import registry  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -46,14 +46,24 @@ def main() -> None:
 
     obs_dim = env.observation_space.shape[0]
     act_dim = env.action_space.shape[0]
-    if obs_dim != 47 or act_dim != 12:
-        raise AssertionError(f"K1 G1-style runtime expects 47->12, got {obs_dim}->{act_dim}")
+    if args.env in ("k1-beyond-mimic-mj-dance-002", "k1-mj-dance-002"):
+        expected_obs = 119
+        expected_act = 22
+    elif args.env.startswith("k1-amp"):
+        expected_obs = 375
+        expected_act = 22
+    else:
+        expected_obs = 47
+        expected_act = 12
+    if obs_dim != expected_obs or act_dim != expected_act:
+        raise AssertionError(f"Expected {expected_obs}->{expected_act}, got {obs_dim}->{act_dim}")
 
     if state.obs.shape != (args.num_envs, obs_dim):
         raise AssertionError(f"Unexpected reset obs shape {state.obs.shape}")
     assert_finite("reset obs", state.obs)
 
-    first_gait = state.info["gait_phase"].copy()
+    progress_key = "gait_phase" if "gait_phase" in state.info else "motion_frame"
+    first_progress = state.info[progress_key].copy()
     for step_idx in range(args.steps):
         if args.zero_action:
             actions = np.zeros((args.num_envs, act_dim), dtype=np.float32)
@@ -67,12 +77,12 @@ def main() -> None:
         assert_finite("step obs", state.obs)
         assert_finite("reward", state.reward)
 
-    if args.steps > 0 and not np.any(state.info["gait_phase"] != first_gait):
-        raise AssertionError("gait_phase did not advance")
+    if args.steps > 0 and not np.any(state.info[progress_key] != first_progress):
+        raise AssertionError(f"{progress_key} did not advance")
 
     print(
         f"OK {args.env}: obs={state.obs.shape}, action=({act_dim},), "
-        f"reward_mean={float(np.mean(state.reward)):.6f}, gait_phase={state.info['gait_phase'][:4].tolist()}"
+        f"reward_mean={float(np.mean(state.reward)):.6f}, {progress_key}={state.info[progress_key][:4].tolist()}"
     )
 
 

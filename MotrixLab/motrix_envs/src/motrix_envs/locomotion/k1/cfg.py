@@ -445,6 +445,8 @@ K1_AMP_LEG_JOINTS = K1_AMP_JOINT_ORDER[10:]
 K1_AMP_DEFAULT_MOTION_FILE = str(
     Path(__file__).resolve().parents[5] / "motions" / "K1" / "k1_mj2_seg1_50fps.npz"
 )
+K1_BEYOND_MIMIC_NUM_OBS = 119
+K1_BEYOND_MIMIC_NUM_ACT = 22
 
 
 @dataclass
@@ -602,6 +604,7 @@ class AmpRewardConfig:
     motion_joint_vel_sigma: float = 3.0
     motion_base_height_sigma: float = 0.12
     command_forward_vel_margin: float = 0.03
+    target_feet_air_time: float = 0.50
 
 
 @dataclass
@@ -693,3 +696,129 @@ class AmpWalkSmallRewardConfig(AmpRewardConfig):
 class K1AmpWalkSmallEnvCfg(K1AmpWalkEnvCfg):
     commands: AmpWalkSmallCommands = field(default_factory=AmpWalkSmallCommands)
     reward_config: AmpWalkSmallRewardConfig = field(default_factory=AmpWalkSmallRewardConfig)
+
+
+@dataclass
+class AmpWalkLiftRewardConfig(AmpWalkSmallRewardConfig):
+    scales: dict[str, float] = field(
+        default_factory=lambda: {
+            "termination": -500.0,
+            "tracking_lin_vel": 0.4,
+            "command_forward_vel": 8.0,
+            "overspeed": -6.0,
+            "tracking_ang_vel": 0.0,
+            "stand_still": -0.2,
+            "lin_vel_z": -1.0,
+            "ang_vel_xy": -0.05,
+            "orientation": -10.0,
+            "base_height": -1.0,
+            "torques": -1.0e-5,
+            "dof_vel": -2.0e-4,
+            "dof_acc": -2.5e-8,
+            "feet_air_time": 0.0,
+            "collision": -1.0,
+            "action_rate": -0.02,
+            "dof_pos_limits": -5.0,
+            "alive": 10.0,
+            "hip_pos": -0.2,
+            "joint_regularization": -0.02,
+            "upper_body_regularization": -1.0,
+            "upper_body_velocity": -0.002,
+            "motion_leg_joint_pos": 0.03,
+            "motion_leg_joint_vel": 0.005,
+            "motion_base_height": 0.0,
+            "contact_no_vel": -0.2,
+            "feet_swing_height": -20.0,
+            "contact": 0.18,
+        }
+    )
+    target_feet_air_time: float = 0.12  # unused when feet_air_time scale is 0
+
+
+@registry.envcfg("k1-amp-walk-lift")
+@dataclass
+class K1AmpWalkLiftEnvCfg(K1AmpWalkEnvCfg):
+    commands: AmpWalkSmallCommands = field(default_factory=AmpWalkSmallCommands)
+    reward_config: AmpWalkLiftRewardConfig = field(default_factory=AmpWalkLiftRewardConfig)
+    motion_reference: AmpMotionReference = field(default_factory=lambda: AmpMotionReference(enabled=True))
+
+
+# --- K1 BeyondMimic / booster_train native port ---
+
+
+@dataclass
+class BeyondMimicMotionReference:
+    file: str = K1_AMP_DEFAULT_MOTION_FILE
+    input_fps: float = 50.0
+    random_start: bool = True
+    reset_root_velocity_scale: float = 0.0
+    reset_joint_velocity_scale: float = 0.0
+    max_reset_joint_vel: float = 5.0
+    root_pos_perturb: float = 0.02
+    root_z_perturb: float = 0.01
+    root_rpy_perturb: float = 0.05
+    root_yaw_perturb: float = 0.10
+    root_lin_vel_perturb: float = 0.0
+    root_ang_vel_perturb: float = 0.0
+    joint_pos_perturb: float = 0.02
+
+
+@dataclass
+class BeyondMimicRewardConfig:
+    scales: dict[str, float] = field(
+        default_factory=lambda: {
+            "motion_global_anchor_pos": 0.5,
+            "motion_global_anchor_ori": 0.5,
+            "motion_joint_pos": 1.0,
+            "motion_joint_vel": 0.1,
+            "action_rate_l2": -0.1,
+            "joint_limit": -10.0,
+            "undesired_contacts": -0.1,
+            "base_height": -0.1,
+            "orientation": -0.1,
+            "alive": 0.1,
+            "termination": -0.0,
+        }
+    )
+    only_positive_rewards: bool = False
+    motion_anchor_pos_sigma: float = 0.3
+    motion_anchor_ori_sigma: float = 0.4
+    motion_joint_pos_sigma: float = 0.3
+    motion_joint_vel_sigma: float = 1.0
+    target_base_height: float = 0.54
+    min_base_height: float = 0.42
+    max_tilt_xy: float = 0.80
+    soft_dof_pos_limit: float = 0.9
+    anchor_max_height_error: float = 1.0
+    anchor_max_ori_error: float = 1.5
+
+
+@dataclass
+class BeyondMimicDomainRand(DomainRand):
+    push_robots: bool = True
+    push_interval_s: float = 3.0
+    max_push_vel_xy: float = 0.5
+
+
+@registry.envcfg("k1-beyond-mimic-mj-dance-002")
+@dataclass
+class K1BeyondMimicMjDance002EnvCfg(EnvCfg):
+    max_episode_seconds: float = 10.0
+    model_file: str = "/opt/sim_soccer2/legged_gym/resources/robots/K1/K1_22dof.xml"
+    control_config: AmpControlConfig = field(default_factory=AmpControlConfig)
+    reward_config: BeyondMimicRewardConfig = field(default_factory=BeyondMimicRewardConfig)
+    init_state: InitState = field(default_factory=InitState)
+    normalization: AmpNormalization = field(default_factory=AmpNormalization)
+    noise: Noise = field(default_factory=Noise)
+    domain_rand: BeyondMimicDomainRand = field(default_factory=BeyondMimicDomainRand)
+    motion_reference: BeyondMimicMotionReference = field(default_factory=BeyondMimicMotionReference)
+    asset: Asset = field(default_factory=Asset)
+    sensor: AmpSensor = field(default_factory=AmpSensor)
+    sim_dt: float = 0.002
+    ctrl_dt: float = 0.02
+
+
+@registry.envcfg("k1-mj-dance-002")
+@dataclass
+class K1MjDance002EnvCfg(K1BeyondMimicMjDance002EnvCfg):
+    pass

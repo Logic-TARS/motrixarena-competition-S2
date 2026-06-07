@@ -75,7 +75,7 @@ uv run scripts/view.py --env cartpole          # visualize
 uv run pytest                                  # run tests
 ```
 
-Available K1 environment names: `k1-flat-terrain-walk`, `k1-point-navigation`, `k1-ball-navigation`.
+Available K1 environment names: `k1-flat-terrain-walk`, `k1-point-navigation`, `k1-ball-navigation`, `k1-amp-walk`, `k1-amp-walk-small`, `k1-amp-walk-lift`.
 
 ### K1 Locomotion Smoke Test
 ```bash

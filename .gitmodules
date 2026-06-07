@@ -1,3 +1,6 @@
 [submodule "booster_train"]
 	path = booster_train
 	url = https://github.com/BoosterRobotics/booster_train.git
+[submodule "robocup_demo"]
+	path = robocup_demo
+	url = https://github.com/BoosterRobotics/robocup_demo.git
