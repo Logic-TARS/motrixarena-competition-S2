@@ -113,7 +113,7 @@ class Commands:
         [0.55, 0.0, 0.0],
         [0.8, 0.0, 0.0],
     ]
-    lin_vel_x = [-1.0, 1.0]
+    lin_vel_x = [0.0, 1.0]
     lin_vel_y = [-0.2, 0.2]
     ang_vel_yaw = [-1.0, 1.0]
     resampling_time: float = 10.0
