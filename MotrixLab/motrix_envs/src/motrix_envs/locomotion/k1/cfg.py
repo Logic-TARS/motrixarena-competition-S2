@@ -175,7 +175,7 @@ class RewardConfig:
         default_factory=lambda: {
             "termination": -0.0,
             "tracking_lin_vel": 1.0,
-            "tracking_ang_vel": 0.5,
+            "tracking_ang_vel": 2.0,
             "lin_vel_z": -2.0,
             "ang_vel_xy": -0.05,
             "orientation": -1.0,
@@ -192,14 +192,14 @@ class RewardConfig:
             "contact_no_vel": -0.2,
             "feet_swing_height": -20.0,
             "contact": 0.18,
-            "straight_motion": 0.8,
+            "straight_motion": 1.5,
             "command_forward_vel": 0.3,
             "overspeed": -0.3,
         }
     )
     only_positive_rewards: bool = True
     trust_contact_rewards: bool = True
-    tracking_sigma: float = 0.25
+    tracking_sigma: float = 0.15
     min_base_height: float = 0.45
     swing_height: float = 0.08
     target_base_height: float = 0.54
@@ -215,7 +215,7 @@ class RewardConfig:
     forward_reward_max_yaw_rate: float = 0.8
     forward_reward_full_lateral_vel: float = 0.05
     forward_reward_max_lateral_vel: float = 0.35
-    straight_motion_yaw_weight: float = 1.0
+    straight_motion_yaw_weight: float = 2.0
     straight_motion_lateral_weight: float = 2.0
     gait_frequency: float = 1.5
 
