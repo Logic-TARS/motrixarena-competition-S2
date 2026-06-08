@@ -1,6 +1,7 @@
 #!/bin/bash
 # Start a K1 decider (robot brain) connecting to simulation
 # Usage: ./scripts/start_decider.sh [--color red|blue] [--id N] [--port PORT]
+#        ./scripts/start_decider.sh --sim-fixed-cmd "0.5,0,0"  # straight-line test
 
 set -euo pipefail
 
@@ -11,6 +12,7 @@ COLOR="${COLOR:-red}"
 ROBOT_ID="${ROBOT_ID:-0}"
 PORT="${PORT:-5555}"
 IP="${IP:-127.0.0.1}"
+FIXED_CMD=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -18,6 +20,7 @@ while [[ $# -gt 0 ]]; do
         --id) ROBOT_ID="$2"; shift 2 ;;
         --port) PORT="$2"; shift 2 ;;
         --ip) IP="$2"; shift 2 ;;
+        --sim-fixed-cmd) FIXED_CMD="--sim-fixed-cmd $2"; shift 2 ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
@@ -42,4 +45,5 @@ exec uv run --directory "$REPO_ROOT/MotrixLab" python -u "$REPO_ROOT/decider/dec
     --ip "$IP" \
     --port "$PORT" \
     --color "$COLOR" \
-    --id "$ROBOT_ID"
+    --id "$ROBOT_ID" \
+    $FIXED_CMD
