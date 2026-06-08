@@ -2372,7 +2372,21 @@ class MultiRobotMotrixSim:
         gravity = (rot_wb.T @ np.array([0.0, 0.0, -1.0], dtype=np.float32)) * obs_scale["gravity_orientation"]
         cmd_src = self.command_buffer[spec.rid] if cmd_override is None else cmd_override
 
-        cmd = cmd_src * obs_scale["cmd"]
+        # Apply command deadzone matching training Commands.command_deadzone = 0.2:
+        # when the linear-velocity norm is below threshold, zero it out so the
+        # policy sees a clean "stand still" command as it was trained on.
+        cmd_src = np.asarray(cmd_src, dtype=np.float32).reshape(3).copy()
+        if float(np.linalg.norm(cmd_src[:2])) <= 0.2:
+            cmd_src[0] = 0.0
+            cmd_src[1] = 0.0
+
+        # Scale commands to match the training observation range.
+        # MotrixLab training uses K1_MOTRIXLAB_CMD_SCALE = [2.0, 2.0, 0.25]
+        # (lin_vel * 2.0, ang_vel * 0.25).  Other flavors use a flat scalar.
+        if self.robot_cfg.k1_policy_flavor == K1_POLICY_FLAVOR_MOTRIXLAB:
+            cmd = cmd_src * K1_MOTRIXLAB_CMD_SCALE
+        else:
+            cmd = cmd_src * obs_scale["cmd"]
 
         if (
             self.robot_cfg.robot_type == PI_PLUS_ROBOT_TYPE
