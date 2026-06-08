@@ -1,0 +1,89 @@
+#!/bin/bash
+# match_config.sh — single source of truth for watch.sh and record_match.sh.
+# Sourced by both scripts; defines defaults, CLI parsing, and launch helpers.
+# To change defaults (team size, fixed cmd, etc.), edit THIS file only.
+
+# ============================================================================
+# Defaults — override via env or CLI
+# ============================================================================
+TEAM_SIZE="${TEAM_SIZE:-1}"
+REAL_TIME="--real-time"
+POLICY_ARG=""
+BLUE_POLICY_ARG=""
+COLOR="${COLOR:-red}"
+ROBOT_ID="${ROBOT_ID:-0}"
+FIXED_CMD="--sim-fixed-cmd 0.5,0,0"   # default: straight-line walk test
+DURATION="${DURATION:-20}"
+OUTPUT=""
+SIM_EXTRA=""       # extra flags passed to sim launcher (e.g. --record-video)
+
+# ============================================================================
+# CLI parsing — handles args for BOTH watch.sh and record_match.sh
+# ============================================================================
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --team-size)       TEAM_SIZE="$2"; shift 2 ;;
+            --no-real-time)    REAL_TIME="--no-real-time"; shift ;;
+            --policy)          POLICY_ARG="--policy $2"; shift 2 ;;
+            --blue-policy)     BLUE_POLICY_ARG="--blue-policy $2 --blue-policy-flavor legged_gym"; shift 2 ;;
+            --color)           COLOR="$2"; shift 2 ;;
+            --id)              ROBOT_ID="$2"; shift 2 ;;
+            --play)            FIXED_CMD=""; shift ;;
+            --sim-fixed-cmd)   FIXED_CMD="--sim-fixed-cmd $2"; shift 2 ;;
+            --d)               DURATION="$2"; shift 2 ;;
+            --output)          OUTPUT="$2"; shift 2 ;;
+            *) echo "Unknown option: $1"; exit 1 ;;
+        esac
+    done
+}
+
+# ============================================================================
+# Shared helpers
+# ============================================================================
+check_uv() {
+    if ! command -v uv &>/dev/null; then
+        echo "uv is required. Install: python3 -m pip install --user uv" >&2
+        exit 1
+    fi
+}
+
+kill_stale() {
+    fuser -k 5555/tcp 2>/dev/null || true
+    fuser -k 5811/tcp 2>/dev/null || true
+    sleep 0.5
+}
+
+launch_sim() {
+    echo "=== Starting Simulation ==="
+    echo "Team size: $TEAM_SIZE"
+    echo ""
+    export PYTHONUNBUFFERED=1
+    export PYTHONPATH="$REPO_ROOT/simulation/motrixsim${PYTHONPATH:+:$PYTHONPATH}"
+    uv run --directory "$REPO_ROOT/MotrixLab" python -u -m app.runner \
+        --team-size "$TEAM_SIZE" \
+        $REAL_TIME \
+        $POLICY_ARG \
+        $BLUE_POLICY_ARG \
+        $SIM_EXTRA &
+    SIM_PID=$!
+    echo "Sim PID: $SIM_PID"
+}
+
+launch_decider() {
+    echo "=== Starting Decider ==="
+    echo "Color: $COLOR  ID: $ROBOT_ID"
+    echo "Cmd:   ${FIXED_CMD:-(game FSM)}"
+    echo ""
+    export PYTHONPATH="$REPO_ROOT/decider${PYTHONPATH:+:$PYTHONPATH}"
+    uv run --directory "$REPO_ROOT/MotrixLab" python -u "$REPO_ROOT/decider/decider.py" \
+        --simulation --ip 127.0.0.1 --port 5555 \
+        --color "$COLOR" --id "$ROBOT_ID" \
+        $FIXED_CMD &
+    DECIDER_PID=$!
+    echo "Decider PID: $DECIDER_PID"
+}
+
+webview_url() {
+    echo "http://localhost:5811"
+}
