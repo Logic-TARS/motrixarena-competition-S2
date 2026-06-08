@@ -401,6 +401,9 @@ class K1WalkTask(NpEnv):
             "contact_no_vel": self._reward_contact_no_vel(info),
             "feet_swing_height": self._reward_feet_swing_height(info),
             "contact": self._reward_contact(info),
+            "straight_motion": self._reward_straight_motion(data, commands),
+            "command_forward_vel": self._reward_command_forward_vel(data, commands),
+            "overspeed": self._reward_overspeed(data, commands),
         }
         if self.foot_check_num > 0:
             result["feet_air_time"] = self._reward_feet_air_time(commands, info)
@@ -470,9 +473,14 @@ class K1WalkTask(NpEnv):
         cfg = self.cfg.reward_config
         local_vel = self.get_local_linvel(data)
         yaw_error = self.get_gyro(data)[:, 2] - commands[:, 2]
-        return cfg.straight_motion_yaw_weight * np.square(yaw_error) + cfg.straight_motion_lateral_weight * np.square(
+        # Only penalize lateral/yaw when commanded to go (mostly) forward.
+        # Without this gate, straight_motion would conflict with lateral
+        # velocity commands, pulling the policy in opposite directions.
+        is_forward = (np.abs(commands[:, 1]) < 0.15).astype(np.float32)
+        penalty = cfg.straight_motion_yaw_weight * np.square(yaw_error) + cfg.straight_motion_lateral_weight * np.square(
             local_vel[:, 1]
         )
+        return is_forward * penalty
 
     def _reward_forward_posture_gate(self, data):
         pose = self._body.get_pose(data)

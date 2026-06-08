@@ -114,7 +114,7 @@ class Commands:
         [0.8, 0.0, 0.0],
     ]
     lin_vel_x = [-1.0, 1.0]
-    lin_vel_y = [-0.5, 0.5]
+    lin_vel_y = [-0.2, 0.2]
     ang_vel_yaw = [-1.0, 1.0]
     resampling_time: float = 10.0
     command_deadzone: float = 0.2
@@ -192,6 +192,9 @@ class RewardConfig:
             "contact_no_vel": -0.2,
             "feet_swing_height": -20.0,
             "contact": 0.18,
+            "straight_motion": 0.8,
+            "command_forward_vel": 0.3,
+            "overspeed": -0.3,
         }
     )
     only_positive_rewards: bool = True
