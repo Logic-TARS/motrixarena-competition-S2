@@ -7,13 +7,13 @@
 # Defaults — override via env or CLI
 # ============================================================================
 TEAM_SIZE="${TEAM_SIZE:-1}"
-REAL_TIME="--real-time"
+REAL_TIME="--no-real-time"
 POLICY_ARG=""
 BLUE_POLICY_ARG=""
 COLOR="${COLOR:-red}"
 ROBOT_ID="${ROBOT_ID:-0}"
 FIXED_CMD="--sim-fixed-cmd 0.5,0,0"   # default: straight-line walk test
-DURATION="${DURATION:-20}"
+DURATION="${DURATION:-60}"
 OUTPUT=""
 SIM_EXTRA=""       # extra flags passed to sim launcher (e.g. --record-video)
 
