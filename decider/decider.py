@@ -427,6 +427,19 @@ class SimAgent:
         vel_x *= self._config.get("max_walk_vel_x", 0.25)
         vel_y *= self._config.get("max_walk_vel_y", 0.1)
         vel_theta *= self._config.get("max_walk_vel_theta", 0.5)
+        # Apply min_walk_vel deadband (matching Agent.cmd_vel)
+        if vel_x > 0.001:
+            vel_x += self._config.get("min_walk_vel_x", 0.2)
+        elif vel_x < -0.001:
+            vel_x -= self._config.get("min_walk_vel_x", 0.2)
+        if vel_y > 0.001:
+            vel_y += self._config.get("min_walk_vel_y", 0.2)
+        elif vel_y < -0.001:
+            vel_y -= self._config.get("min_walk_vel_y", 0.2)
+        if vel_theta > 0.001:
+            vel_theta += self._config.get("min_walk_vel_theta", 0.3)
+        elif vel_theta < -0.001:
+            vel_theta -= self._config.get("min_walk_vel_theta", 0.3)
         vel_x = float(np.clip(vel_x, -1.0, 1.0))
         vel_y = float(np.clip(vel_y, -1.0, 1.0))
         vel_theta = float(np.clip(vel_theta, -1.0, 1.0))

@@ -1,6 +1,6 @@
 #!/bin/bash
 # Start K1 soccer simulation with MotrixLab-trained policy
-# Usage: ./scripts/start_sim.sh [--team-size N] [--no-real-time] [--policy PATH]
+# Usage: ./scripts/start_sim.sh [--team-size N] [--no-real-time] [--policy PATH] [--blue-policy PATH]
 
 set -euo pipefail
 
@@ -10,6 +10,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TEAM_SIZE="${TEAM_SIZE:-1}"
 REAL_TIME="--real-time"
 POLICY_ARG=""
+BLUE_POLICY_ARG=""
 RECORD_ARG=""
 
 while [[ $# -gt 0 ]]; do
@@ -17,6 +18,7 @@ while [[ $# -gt 0 ]]; do
         --team-size) TEAM_SIZE="$2"; shift 2 ;;
         --no-real-time) REAL_TIME="--no-real-time"; shift ;;
         --policy) POLICY_ARG="--policy $2"; shift 2 ;;
+        --blue-policy) BLUE_POLICY_ARG="--blue-policy $2 --blue-policy-flavor legged_gym"; shift 2 ;;
         --record-video) RECORD_ARG="--record-video $2"; shift 2 ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
@@ -47,4 +49,5 @@ exec uv run --directory "$REPO_ROOT/MotrixLab" python -u -m app.runner \
     --team-size "$TEAM_SIZE" \
     $REAL_TIME \
     $POLICY_ARG \
+    $BLUE_POLICY_ARG \
     $RECORD_ARG

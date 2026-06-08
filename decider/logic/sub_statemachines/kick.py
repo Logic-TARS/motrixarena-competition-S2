@@ -124,12 +124,13 @@ class KickStateMachine:
             self.logger.debug("\n[KICK FSM] Positioning complete! Executing kick...")
             self.agent.cmd_vel(0, 0, 0)
             ball_x = self.agent.get_ball_pos()[0] - self.camera_bias
-            time.sleep(0.5)
+            # [FIX] Removed time.sleep(0.5) — blocking call breaks 50Hz main loop.
+            # Kick timing is now managed by the top-level DeciderFSM.
             if ball_x > 0:
                 self.agent.kick(foot=0)
             else:
                 self.agent.kick(foot=1)
-            time.sleep(2)
+            # [FIX] Removed time.sleep(2) — blocking call breaks 50Hz main loop.
             self.agent.move_head(inf, inf)
             self.logger.info("===============================[KICK FSM] Kick executed successfully!=========================")
             self.logger.info("===============================[KICK FSM] Kick executed successfully!=========================")

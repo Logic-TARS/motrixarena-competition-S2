@@ -1475,6 +1475,8 @@ class MultiRobotMotrixSim:
     def __init__(self, args: RuntimeArgs):
         self.args = args
         self.robot_cfg: RobotRuntimeConfig = args.robot_cfg
+        self._blue_cfg: RobotRuntimeConfig | None = args.blue_robot_cfg
+        self._has_blue_policy = self._blue_cfg is not None
         self.max_red_robots = args.max_red_robots
         self.max_blue_robots = args.max_blue_robots
         self.active_robot_ids = self._active_ids_from_limits(self.max_red_robots, self.max_blue_robots)
@@ -1573,6 +1575,17 @@ class MultiRobotMotrixSim:
         self._k1_stand_policy: nn.Module | None = None
         if self.robot_cfg.k1_stand_policy is not None and not self.robot_cfg.use_k1_amp_onnx:
             self._init_k1_stand_policy(self.robot_cfg.k1_stand_policy)
+
+        # Blue team policy (when different from red)
+        self._blue_ts_policy: torch.jit.ScriptModule | None = None
+        self._blue_policy: nn.Module | None = None
+        self._blue_onnx_session = None
+        self._blue_policy_is_onnx = False
+        self._blue_policy_is_torchscript = False
+        self._blue_policy_obs_dim = 0
+        self._blue_policy_action_dim = 0
+        if self._has_blue_policy:
+            self._init_blue_policy(self._blue_cfg.policy)
 
         self.robot_specs: dict[int, RobotSpec] = self._build_robot_specs()
         self._apply_team_body_colors()
@@ -1775,6 +1788,53 @@ class MultiRobotMotrixSim:
             raise RuntimeError(f"K1 legged_gym policy must be .onnx or .pt, got {path}")
 
         self.policy = self._load_torch_policy(path)
+
+    def _init_blue_policy(self, policy_path: Path) -> None:
+        """Load blue team policy. Mirrors _init_policy using self._blue_cfg."""
+        path = Path(policy_path)
+        if self._blue_cfg.use_k1_amp_onnx:
+            raise RuntimeError("Blue team AMP ONNX policy not supported yet")
+        if self._blue_cfg.use_k1_legged_gym_policy:
+            suf = path.suffix.lower()
+            if suf == ".pt":
+                ts = torch.jit.load(str(path), map_location=self.policy_device)
+                ts.eval()
+                with torch.inference_mode():
+                    probe = ts(torch.zeros(1, K1_LEGGED_GYM_NUM_OBS, device=self.policy_device))
+                if int(probe.shape[-1]) != K1_LEGGED_GYM_NUM_ACT:
+                    raise RuntimeError(f"Blue legged TorchScript expected act_dim={K1_LEGGED_GYM_NUM_ACT}, got {probe.shape}")
+                self._blue_ts_policy = ts
+                self._blue_policy_is_torchscript = True
+                self._blue_policy_obs_dim = K1_LEGGED_GYM_NUM_OBS
+                self._blue_policy_action_dim = K1_LEGGED_GYM_NUM_ACT
+                print(f"[MultiRobotMotrixSim] Blue K1 legged_gym TorchScript: {path} "
+                      f"(obs_dim={self._blue_policy_obs_dim}, act_dim={self._blue_policy_action_dim}, "
+                      f"flavor={self._blue_cfg.k1_policy_flavor})")
+                return
+            raise RuntimeError(f"Blue legged_gym policy must be .pt, got {path}")
+        # MotrixLab flavor: load as nn.Module (use internal loader to avoid overwriting red dims)
+        policy, in_d, out_d = self._load_mlp_actor_from_checkpoint(path)
+        self._blue_policy = policy
+        self._blue_policy_obs_dim = in_d
+        self._blue_policy_action_dim = out_d
+        print(f"[MultiRobotMotrixSim] Blue K1 MotrixLab actor: {path} "
+              f"(obs_dim={in_d}, act_dim={out_d}, flavor={self._blue_cfg.k1_policy_flavor})")
+
+    def _infer_blue_policy_actions(self, obs_batch: np.ndarray) -> np.ndarray:
+        """Run inference with blue team policy."""
+        if self._blue_policy_is_onnx:
+            raise RuntimeError("Blue ONNX policy inference not implemented")
+        if self._blue_policy_is_torchscript:
+            if self._blue_ts_policy is None:
+                raise RuntimeError("Blue TorchScript policy not loaded")
+            with torch.inference_mode():
+                obs_tensor = torch.from_numpy(obs_batch.astype(np.float32, copy=False)).to(self.policy_device)
+                return self._blue_ts_policy(obs_tensor).detach().cpu().numpy().astype(np.float32, copy=False)
+        if self._blue_policy is None:
+            raise RuntimeError("Blue torch policy not loaded")
+        with torch.inference_mode():
+            obs_tensor = torch.from_numpy(obs_batch).to(self.policy_device)
+            return self._blue_policy(obs_tensor).detach().cpu().numpy().astype(np.float32, copy=False)
 
     def _load_mlp_actor_from_checkpoint(self, policy_path: Path) -> tuple[nn.Module, int, int]:
         ckpt = _load_checkpoint_compat(policy_path, map_location=self.policy_device)
@@ -2406,41 +2466,61 @@ class MultiRobotMotrixSim:
             infer_specs.append(spec)
             infer_cmd_override.append(cmd_ov)
 
-        walk_obs: list[np.ndarray] = []
+        # Split observations by team for per-team policy inference
+        walk_obs_red: list[np.ndarray] = []
+        walk_obs_blue: list[np.ndarray] = []
         stand_obs: list[np.ndarray] = []
         debug_obs_list: list[np.ndarray] = []
+        walk_team_is_blue: list[bool] = []  # parallel to combined walk_obs for action dispatch
 
         if len(infer_specs) != len(infer_cmd_override):
             raise RuntimeError("internal: infer_specs / infer_cmd_override length mismatch")
         for spec, cmd_ov in zip(infer_specs, infer_cmd_override):
+            is_blue = bool(spec.rid >= MAX_ROBOTS_PER_TEAM and self._has_blue_policy)
+            use_legged = self._blue_cfg.use_k1_legged_gym_policy if is_blue else self.robot_cfg.use_k1_legged_gym_policy
             cmd_gate = default_cmd if cmd_ov is not None else self.command_buffer[spec.rid]
-            if hybrid:
+            if hybrid and not is_blue:  # hybrid only supported for red team
                 self._k1_update_hybrid_walk_state(
                     spec, np.clip(np.asarray(cmd_gate, dtype=np.float32), CMD_VEL_NORM_MIN, CMD_VEL_NORM_MAX)
                 )
                 if spec.k1_hybrid_walking:
                     o = self._obs_k1_legged_gym(spec, cmd_override=cmd_ov)
-                    walk_obs.append(o)
+                    walk_obs_red.append(o); walk_team_is_blue.append(False)
                 else:
                     o = self._obs_k1_fullbody_for_hybrid(spec, cmd_override=cmd_ov)
                     stand_obs.append(o)
             elif self.robot_cfg.use_k1_amp_onnx:
                 o = self._obs_k1_amp(spec, cmd_override=cmd_ov)
-                walk_obs.append(o)
-            elif self.robot_cfg.use_k1_legged_gym_policy:
-                o = self._obs_k1_legged_gym(spec, cmd_override=cmd_ov)
-                walk_obs.append(o)
+                walk_obs_red.append(o); walk_team_is_blue.append(False)
             else:
-                o = self._obs_for_robot(spec, cmd_override=cmd_ov)
-                walk_obs.append(o)
+                if use_legged:
+                    o = self._obs_k1_legged_gym(spec, cmd_override=cmd_ov)
+                else:
+                    o = self._obs_for_robot(spec, cmd_override=cmd_ov)
+                if is_blue:
+                    walk_obs_blue.append(o); walk_team_is_blue.append(True)
+                else:
+                    walk_obs_red.append(o); walk_team_is_blue.append(False)
             debug_obs_list.append(o)
 
-        act_walk_batch: np.ndarray | None = None
-        if walk_obs:
-            obs_batch_w = np.stack(walk_obs, axis=0).astype(np.float32, copy=False)
-            act_walk_batch = self._infer_policy_actions(obs_batch_w)
-            if act_walk_batch.ndim == 1:
-                act_walk_batch = act_walk_batch.reshape(1, -1)
+        # --- red team policy inference ---
+        act_walk_red: np.ndarray | None = None
+        if walk_obs_red:
+            obs_batch_r = np.stack(walk_obs_red, axis=0).astype(np.float32, copy=False)
+            act_walk_red = self._infer_policy_actions(obs_batch_r)
+            if act_walk_red.ndim == 1:
+                act_walk_red = act_walk_red.reshape(1, -1)
+
+        # --- blue team policy inference ---
+        act_walk_blue: np.ndarray | None = None
+        if walk_obs_blue:
+            obs_batch_b = np.stack(walk_obs_blue, axis=0).astype(np.float32, copy=False)
+            if self._has_blue_policy:
+                act_walk_blue = self._infer_blue_policy_actions(obs_batch_b)
+            else:
+                act_walk_blue = self._infer_policy_actions(obs_batch_b)
+            if act_walk_blue.ndim == 1:
+                act_walk_blue = act_walk_blue.reshape(1, -1)
 
         act_stand_batch: np.ndarray | None = None
         if stand_obs:
@@ -2449,7 +2529,8 @@ class MultiRobotMotrixSim:
             if act_stand_batch.ndim == 1:
                 act_stand_batch = act_stand_batch.reshape(1, -1)
 
-        wi = 0
+        wi_red = 0
+        wi_blue = 0
         si = 0
         if infer_specs:
             for i, spec in enumerate(infer_specs):
@@ -2460,10 +2541,17 @@ class MultiRobotMotrixSim:
                     act = np.nan_to_num(act_stand_batch[si], nan=0.0, posinf=0.0, neginf=0.0)
                     si += 1
                 else:
-                    if act_walk_batch is None:
-                        raise RuntimeError("K1 walk policy produced no actions")
-                    act = np.nan_to_num(act_walk_batch[wi], nan=0.0, posinf=0.0, neginf=0.0)
-                    wi += 1
+                    team_blue = walk_team_is_blue[wi_red + wi_blue] if (wi_red + wi_blue) < len(walk_team_is_blue) else False
+                    if team_blue:
+                        if act_walk_blue is None:
+                            raise RuntimeError("Blue walk policy produced no actions")
+                        act = np.nan_to_num(act_walk_blue[wi_blue], nan=0.0, posinf=0.0, neginf=0.0)
+                        wi_blue += 1
+                    else:
+                        if act_walk_red is None:
+                            raise RuntimeError("Red walk policy produced no actions")
+                        act = np.nan_to_num(act_walk_red[wi_red], nan=0.0, posinf=0.0, neginf=0.0)
+                        wi_red += 1
                 if spec.rid == debug_rid:
                     debug_obs = debug_obs_list[i].copy()
                     debug_act = act.copy()

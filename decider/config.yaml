@@ -200,3 +200,37 @@ goalkeeper:
   close_to_ball_threshold_x_m: 0.5
   ignore_ball_vel: 5.0
   activate_save: false
+
+# Command filter — velocity smoothing applied after every skill tick
+cmd_filter:
+  vx_max: 0.75
+  vx_min: -0.25
+  vy_max: 0.35
+  w_max: 1.5
+  vx_accel: 0.03
+  vy_accel: 0.02
+  w_accel: 0.08
+  smooth_alpha: 0.3
+
+# Top-level Decider FSM thresholds
+decider_fsm:
+  ball_seen_confirm_frames: 3
+  ball_lost_confirm_frames: 5
+  approach_to_align_dist: 0.55
+  approach_to_align_angle_deg: 50
+  align_to_dribble_ball_x_min: 0.15
+  align_to_dribble_ball_x_max: 0.40
+  align_to_dribble_ball_y_max: 0.18
+  align_to_dribble_facing_error_deg: 40
+  dribble_to_approach_dist: 1.5
+  kick_ball_x_min: 0.08
+  kick_ball_x_max: 0.50
+  kick_ball_y_max: 0.15
+  kick_facing_error_deg: 35
+  kick_max_dist_to_goal: 10.0
+  kick_ball_dist_max: 0.50
+  kick_cooldown_sec: 2.0
+  kick_action_duration_sec: 0.5
+  kick_settle_duration_sec: 0.3
+  recover_duration_sec: 0.5
+  search_timeout_sec: 15.0

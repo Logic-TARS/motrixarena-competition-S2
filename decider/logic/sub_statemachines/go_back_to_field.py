@@ -138,7 +138,7 @@ class GoBackToFieldStateMachine:
         self.logger.debug(f"[Go Back to Field] Arrived at target? {'Yes' if result else 'No'}")
         return result
 
-    def run(self, aim_x=0, aim_y=0, aim_yaw=0):
+    def run(self, aim_x=None, aim_y=None, aim_yaw=None):
         """状态机的主运行函数，控制机器人返回场地的整个流程"""
         # if self.agent.receiver.game_state != 'STATE_READY':
         #    self.agent.stop(0.5)
@@ -160,9 +160,9 @@ class GoBackToFieldStateMachine:
         self.agent.is_going_back_to_field = True
         self.logger.debug("[Go Back to Field FSM] Starting to go back to field...")
         # 优先使用传入的参数，其次从命令获取，最后使用默认值
-        self.aim_x = aim_x if aim_x != 0 else self.agent.get_command().get('data', {}).get('aim_x', self.aim_x)
-        self.aim_y = aim_y if aim_y != 0 else self.agent.get_command().get('data', {}).get('aim_y', self.aim_y)
-        self.aim_yaw = aim_yaw if aim_yaw != 0 else self.agent.get_command().get('data', {}).get('aim_yaw', self.aim_yaw)
+        self.aim_x = aim_x if aim_x is not None else self.agent.get_command().get('data', {}).get('aim_x', self.aim_x)
+        self.aim_y = aim_y if aim_y is not None else self.agent.get_command().get('data', {}).get('aim_y', self.aim_y)
+        self.aim_yaw = aim_yaw if aim_yaw is not None else self.agent.get_command().get('data', {}).get('aim_yaw', self.aim_yaw)
         self.update_go_back_to_field_status()
         self.logger.debug(f"\n[Go Back to Field FSM] Current state: {self.state}")
         self.logger.debug("[Go Back to Field FSM] Triggering 'update_status' transition")
@@ -265,8 +265,9 @@ class GoBackToFieldStateMachine:
         else:  # 达到良好状态
             self.agent.cmd_vel(0, 0, 0)
             self.logger.debug("[Go Back to Field] Finished going back to field. Ready to play.")
-            if self.adjust_yaw_settle_s > 0.0:
-                time.sleep(self.adjust_yaw_settle_s)
+            # [FIX] Removed time.sleep(self.adjust_yaw_settle_s) — blocking
+            # call breaks the 50 Hz main control loop.  Config defaults to
+            # 0.0 and should stay that way for simulation.
             self.agent.is_going_back_to_field = False
             self.last_arrive_time = time.time()
             self.logger.debug("[Go Back to Field FSM] Arrived at target!")
@@ -284,7 +285,9 @@ class GoBackToFieldStateMachine:
     def arrived_stop_moving(self):
         """到达目标位置后停止移动"""
         self.logger.debug("[Go Back to Field] Stopping moving...")
-        self.agent.stop(0.5)
+        # [FIX] Replaced agent.stop(0.5) with non-blocking cmd_vel to avoid
+        # stalling the 50 Hz main control loop.
+        self.agent.cmd_vel(0.0, 0.0, 0.0)
         self.update_go_back_to_field_status()
         self.last_arrive_time = time.time()
         self.agent.move_head(inf, inf)

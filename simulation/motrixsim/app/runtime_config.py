@@ -494,6 +494,8 @@ class RuntimeArgs:
     policy_device: str
     real_time: bool
     record_video: str | None = None
+    # Blue team policy config.  When identical to red, this is the same object.
+    blue_robot_cfg: RobotRuntimeConfig | None = None
 
 
 def _clamp_team_count(v: int) -> int:
@@ -817,6 +819,24 @@ def parse_runtime_args(mujoco_dir: Path) -> RuntimeArgs:
         "MotrixLab/motrix_envs k1-flat-terrain-walk; keep 'legged_gym' for legacy T1/legged_gym models.",
     )
     parser.add_argument(
+        "--blue-policy",
+        type=Path,
+        default=None,
+        help="Blue team policy override. When omitted, blue uses the same policy as red (--policy).",
+    )
+    parser.add_argument(
+        "--blue-policy-flavor",
+        choices=K1_POLICY_FLAVORS,
+        default=None,
+        help="K1 policy flavor for blue team. When omitted, blue uses the same flavor as red (--k1-policy-flavor).",
+    )
+    parser.add_argument(
+        "--blue-k1-legged-gym",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Override --k1-legged-gym for blue team only.",
+    )
+    parser.add_argument(
         "--record-video",
         type=str,
         default=None,
@@ -836,6 +856,22 @@ def parse_runtime_args(mujoco_dir: Path) -> RuntimeArgs:
         use_k1_legged_gym=ns.k1_legged_gym,
         k1_policy_flavor=ns.k1_policy_flavor,
     )
+
+    # --- blue team config (defaults to legged_gym model_4700.pt) ---
+    repo_root = mujoco_dir.parent.parent
+    _blue_policy = ns.blue_policy if ns.blue_policy is not None else (repo_root / "model_4700.pt")
+    _blue_flavor = ns.blue_policy_flavor if ns.blue_policy_flavor is not None else K1_POLICY_FLAVOR_LEGGED_GYM
+    _blue_legged = ns.blue_k1_legged_gym if ns.blue_k1_legged_gym is not None else True
+
+    blue_robot_cfg = build_robot_runtime_config(
+        mujoco_dir,
+        robot_type=ns.robot_type,
+        policy_override=_blue_policy,
+        robot_xml_override=ns.robot_xml,
+        use_k1_legged_gym=_blue_legged,
+        k1_policy_flavor=_blue_flavor,
+    )
+
     return RuntimeArgs(
         robot_type=robot_cfg.robot_type,
         robot_cfg=robot_cfg,
@@ -861,6 +897,7 @@ def parse_runtime_args(mujoco_dir: Path) -> RuntimeArgs:
         policy_device=ns.policy_device,
         real_time=ns.real_time,
         record_video=ns.record_video,
+        blue_robot_cfg=blue_robot_cfg,
     )
 
 
