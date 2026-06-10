@@ -18,6 +18,7 @@ import motrixsim as mtx
 import numpy as np
 
 from motrix_envs import registry
+from motrix_envs.locomotion.k1.command_envelope import apply_forward_yaw_envelope
 from motrix_envs.locomotion.k1.cfg import K1WalkNpEnvCfg
 from motrix_envs.math import quaternion
 from motrix_envs.np.env import NpEnv, NpEnvState
@@ -37,6 +38,9 @@ class K1WalkTask(NpEnv):
         self._joint_dof_pos_indices = self._get_actuated_dof_pos_indices()
         self._init_dof_vel = np.zeros((self._num_dof_vel,), dtype=np.float32)
         self._init_dof_pos = self._model.compute_init_dof_pos()
+        self._curriculum_level = 0
+        self._curriculum_episode_count = 0
+        self._curriculum_success_ema = 0.0
         self._init_buffer()
 
     def _init_obs_space(self):
@@ -237,9 +241,10 @@ class K1WalkTask(NpEnv):
         push_mask = (state.info["episode_length"] % push_steps) == 0
         if not np.any(push_mask):
             return
+        curriculum_scale = (self._curriculum_level + 1) / len(self.cfg.commands.yaw_curriculum)
         pushed = np.random.uniform(
-            -cfg.max_push_vel_xy,
-            cfg.max_push_vel_xy,
+            -cfg.max_push_vel_xy * curriculum_scale,
+            cfg.max_push_vel_xy * curriculum_scale,
             size=(int(np.sum(push_mask)), 2),
         ).astype(np.float32)
         dof_vel = state.data.dof_vel.copy()
@@ -326,16 +331,67 @@ class K1WalkTask(NpEnv):
         too_tilted = np.linalg.norm(gravity[:, :2], axis=1) > self.cfg.reward_config.max_tilt_xy
         state.info["termination_too_low"] = too_low.astype(np.float32)
         state.info["termination_too_tilted"] = too_tilted.astype(np.float32)
-        return state.replace(terminated=too_low | too_tilted)
+        terminated = too_low | too_tilted
+        self._update_curriculum(state, terminated)
+        return state.replace(terminated=terminated)
 
     def resample_commands(self, num_envs: int):
+        cfg = self.cfg.commands
         commands = np.zeros((num_envs, 3), dtype=np.float32)
-        commands[:, 0] = np.random.uniform(*self.cfg.commands.lin_vel_x, size=num_envs)
-        commands[:, 1] = np.random.uniform(*self.cfg.commands.lin_vel_y, size=num_envs)
-        commands[:, 2] = np.random.uniform(*self.cfg.commands.ang_vel_yaw, size=num_envs)
-        moving = np.linalg.norm(commands[:, :2], axis=1) > self.cfg.commands.command_deadzone
+        yaw_limit = float(cfg.yaw_curriculum[self._curriculum_level])
+        commands[:, 0] = np.random.uniform(*cfg.lin_vel_x, size=num_envs)
+        commands[:, 1] = np.random.uniform(*cfg.lin_vel_y, size=num_envs)
+        commands[:, 2] = np.random.uniform(-yaw_limit, yaw_limit, size=num_envs)
+
+        mode = np.random.rand(num_envs)
+        stand_end = cfg.stand_probability
+        straight_end = stand_end + cfg.straight_probability
+        turn_end = straight_end + cfg.turn_probability
+        stand = mode < stand_end
+        straight = (mode >= stand_end) & (mode < straight_end)
+        turn = (mode >= straight_end) & (mode < turn_end)
+        commands[stand] = 0.0
+        commands[straight, 1:] = 0.0
+        commands[turn, :2] = 0.0
+
+        commands = apply_forward_yaw_envelope(
+            commands,
+            max_forward_speed=cfg.lin_vel_x[1],
+            yaw_full_speed=cfg.yaw_full_speed,
+            yaw_zero_speed=cfg.yaw_zero_speed,
+        )
+        moving = np.linalg.norm(commands[:, :2], axis=1) > cfg.command_deadzone
         commands[:, :2] *= moving[:, None]
         return commands.astype(np.float32)
+
+    def _update_curriculum(self, state: NpEnvState, terminated: np.ndarray) -> None:
+        cfg = self.cfg.commands
+        completed = terminated | (
+            state.info["episode_length"] >= self.cfg.max_episode_steps
+        )
+        if not np.any(completed):
+            return
+        commands = state.info["commands"][completed]
+        lin_error = np.linalg.norm(
+            commands[:, :2] - self.get_local_linvel(state.data)[completed, :2],
+            axis=1,
+        )
+        yaw_error = np.abs(commands[:, 2] - self.get_gyro(state.data)[completed, 2])
+        success = (~terminated[completed]) & (lin_error < 0.35) & (yaw_error < 0.35)
+        batch_success = float(np.mean(success))
+        alpha = float(cfg.curriculum_ema_alpha)
+        self._curriculum_success_ema = (
+            (1.0 - alpha) * self._curriculum_success_ema + alpha * batch_success
+        )
+        self._curriculum_episode_count += int(np.sum(completed))
+        if (
+            self._curriculum_level < len(cfg.yaw_curriculum) - 1
+            and self._curriculum_episode_count >= int(cfg.curriculum_min_episodes)
+            and self._curriculum_success_ema >= float(cfg.curriculum_success_threshold)
+        ):
+            self._curriculum_level += 1
+            self._curriculum_episode_count = 0
+            self._curriculum_success_ema = 0.0
 
     def update_reward(self, state: NpEnvState) -> NpEnvState:
         reward_dict = self._get_reward(state.data, state.info)
@@ -360,7 +416,35 @@ class K1WalkTask(NpEnv):
         dof_pos = np.tile(self._init_dof_pos, (num_reset, 1))
         dof_vel = np.tile(self._init_dof_vel, (num_reset, 1))
 
-        dof_pos[:, self._joint_dof_pos_indices] += 0.01 * np.random.randn(num_reset, self._num_action)
+        cfg = self.cfg.init_state
+        level_scale = (self._curriculum_level + 1) / len(self.cfg.commands.yaw_curriculum)
+        dof_pos[:, self._joint_dof_pos_indices] += (
+            cfg.joint_pos_noise
+            * level_scale
+            * np.random.randn(num_reset, self._num_action)
+        )
+        roll = np.random.uniform(
+            -cfg.base_roll_pitch_noise * level_scale,
+            cfg.base_roll_pitch_noise * level_scale,
+            size=num_reset,
+        )
+        pitch = np.random.uniform(
+            -cfg.base_roll_pitch_noise * level_scale,
+            cfg.base_roll_pitch_noise * level_scale,
+            size=num_reset,
+        )
+        yaw = np.random.uniform(-np.pi, np.pi, size=num_reset)
+        dof_pos[:, 3:7] = quaternion.from_euler(roll, pitch, yaw)
+        dof_vel[:, :3] = np.random.uniform(
+            -cfg.base_lin_vel_noise * level_scale,
+            cfg.base_lin_vel_noise * level_scale,
+            size=(num_reset, 3),
+        )
+        dof_vel[:, 3:6] = np.random.uniform(
+            -cfg.base_ang_vel_noise * level_scale,
+            cfg.base_ang_vel_noise * level_scale,
+            size=(num_reset, 3),
+        )
 
         data.set_dof_vel(dof_vel)
         data.set_dof_pos(dof_pos, self._model)
@@ -377,6 +461,9 @@ class K1WalkTask(NpEnv):
             "contacts": np.zeros((num_reset, self.foot_check_num), dtype=bool),
             "left_contact": np.zeros((num_reset,), dtype=np.float32),
             "right_contact": np.zeros((num_reset,), dtype=np.float32),
+            "curriculum_level": np.full(
+                (num_reset,), self._curriculum_level, dtype=np.int32
+            ),
             "feet_pos": self._get_foot_positions(data),
             "feet_vel": self._get_foot_velocities(data),
         }

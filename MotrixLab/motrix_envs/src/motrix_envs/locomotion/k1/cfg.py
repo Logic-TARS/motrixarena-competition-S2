@@ -94,8 +94,12 @@ class ControlConfig:
 
 @dataclass
 class InitState:
-    pos = [0.0, 0.0, 0.57]
-    default_joint_angles = {
+    pos: list = field(default_factory=lambda: [0.0, 0.0, 0.57])
+    joint_pos_noise: float = 0.04
+    base_roll_pitch_noise: float = 0.08
+    base_lin_vel_noise: float = 0.12
+    base_ang_vel_noise: float = 0.20
+    default_joint_angles: dict = field(default_factory=lambda: {
         "Left_Hip_Pitch": -0.2,
         "Right_Hip_Pitch": -0.2,
         "Left_Knee_Pitch": 0.4,
@@ -103,22 +107,26 @@ class InitState:
         "Left_Ankle_Pitch": -0.25,
         "Right_Ankle_Pitch": -0.25,
         "default": 0.0,
-    }
+    })
 
 
 @dataclass
 class Commands:
-    vel_limit = [
-        [0.35, 0.0, 0.0],
-        [0.55, 0.0, 0.0],
-        [0.8, 0.0, 0.0],
-    ]
-    lin_vel_x = [0.0, 1.0]
-    lin_vel_y = [-0.2, 0.2]
-    ang_vel_yaw = [-0.1, 0.1]  # Narrowed from [-1.0, 1.0] — focus on forward walking first
-    resampling_time: float = 10.0
+    lin_vel_x: list = field(default_factory=lambda: [0.0, 0.8])
+    lin_vel_y: list = field(default_factory=lambda: [-0.2, 0.2])
+    ang_vel_yaw: list = field(default_factory=lambda: [-1.5, 1.5])
+    yaw_curriculum: list = field(default_factory=lambda: [0.3, 0.6, 1.0, 1.5])
+    curriculum_min_episodes: int = 2048
+    curriculum_success_threshold: float = 0.82
+    curriculum_ema_alpha: float = 0.05
+    resampling_time: float = 3.0
     command_deadzone: float = 0.2
     phase_period: float = 0.8
+    stand_probability: float = 0.10
+    straight_probability: float = 0.25
+    turn_probability: float = 0.20
+    yaw_full_speed: float = 0.25
+    yaw_zero_speed: float = 1.5
 
 
 @dataclass
@@ -147,8 +155,8 @@ class Noise:
 @dataclass
 class DomainRand:
     push_robots: bool = True
-    push_interval_s: float = 8.0
-    max_push_vel_xy: float = 0.1  # Reduced from 0.5 — gentler for early walking
+    push_interval_s: float = 5.0
+    max_push_vel_xy: float = 0.4
 
 
 @dataclass
@@ -173,19 +181,19 @@ class Sensor:
 class RewardConfig:
     scales: dict[str, float] = field(
         default_factory=lambda: {
-            "termination": -0.0,
+            "termination": -10.0,
             "tracking_lin_vel": 2.0,
             "tracking_ang_vel": 2.0,
             "lin_vel_z": -2.0,
             "ang_vel_xy": -0.05,
             "orientation": -1.0,
             "base_height": -10.0,
-            "torques": 0.0,  # Zeroed — was -1e-5, penalises leg movement
+            "torques": -1.0e-5,
             "dof_vel": 0.0,  # Zeroed — was -1e-3, penalises joint velocity
             "dof_acc": -2.5e-7,
             "feet_air_time": 0.0,
-            "collision": 0.0,
-            "action_rate": 0.0,  # Zeroed — was -0.01, penalises changing actions
+            "collision": -1.0,
+            "action_rate": -0.01,
             "dof_pos_limits": -5.0,
             "alive": 0.05,
             "hip_pos": -1.0,
@@ -197,7 +205,7 @@ class RewardConfig:
             "overspeed": -0.3,
         }
     )
-    only_positive_rewards: bool = True
+    only_positive_rewards: bool = False
     trust_contact_rewards: bool = True
     tracking_sigma: float = 0.15
     min_base_height: float = 0.45

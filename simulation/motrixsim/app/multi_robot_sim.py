@@ -1429,6 +1429,11 @@ K1_HYBRID_WALK_ENTER_LIN = 0.04
 K1_HYBRID_WALK_EXIT_LIN = 0.02
 K1_HYBRID_WALK_ENTER_YAW = 0.10
 K1_HYBRID_WALK_EXIT_YAW = 0.04
+K1_FALL_DEBOUNCE_SEC = 0.25
+K1_RECOVERY_ATTEMPT_SEC = 6.0
+K1_RECOVERY_MAX_ATTEMPTS = 3
+K1_RECOVERY_STABLE_SEC = 1.0
+K1_RECOVERY_FAILED_COOLDOWN_SEC = 10.0
 
 
 @dataclass
@@ -1478,6 +1483,14 @@ class RobotSpec:
     k1_amp_last_mjcf: np.ndarray | None = None
     k1_amp_gather_mjcf: np.ndarray | None = None
     k1_amp_upper_mjcf: np.ndarray | None = None
+    k1_recovery_state: str = "LOCOMOTION"
+    k1_recovery_pose: str = ""
+    k1_recovery_bad_frames: int = 0
+    k1_recovery_frames: int = 0
+    k1_recovery_total_frames: int = 0
+    k1_recovery_stable_frames: int = 0
+    k1_recovery_attempts: int = 0
+    k1_recovery_last_action: np.ndarray | None = None
 
 
 class MultiRobotMotrixSim:
@@ -1588,6 +1601,9 @@ class MultiRobotMotrixSim:
         self._k1_stand_policy: nn.Module | None = None
         if self.robot_cfg.k1_stand_policy is not None and not self.robot_cfg.use_k1_amp_onnx:
             self._init_k1_stand_policy(self.robot_cfg.k1_stand_policy)
+        self._k1_recovery_policy: nn.Module | None = None
+        if self.robot_cfg.k1_recovery_policy is not None:
+            self._init_k1_recovery_policy(self.robot_cfg.k1_recovery_policy)
 
         # Blue team policy (when different from red)
         self._blue_ts_policy: torch.jit.ScriptModule | None = None
@@ -2019,6 +2035,29 @@ class MultiRobotMotrixSim:
         mode = "TorchScript traced" if traced is not None else "eager MLP"
         print(f"[MultiRobotMotrixSim] K1 hybrid stand (full-body) policy: {path} ({in_d}->{out_d}, {mode})")
 
+    def _init_k1_recovery_policy(self, policy_path: Path) -> None:
+        path = Path(policy_path)
+        if not path.is_file():
+            raise FileNotFoundError(f"K1 recovery policy not found: {path}")
+        policy, in_d, out_d, _ = self._load_mlp_actor_from_checkpoint(path)
+        if (in_d, out_d) != (K1_FULL_BODY_NUM_OBS, K1_FULL_BODY_NUM_ACT):
+            raise RuntimeError(
+                f"K1 recovery policy must be {K1_FULL_BODY_NUM_OBS}->{K1_FULL_BODY_NUM_ACT}, "
+                f"got {in_d}->{out_d} from {path}"
+            )
+        policy.eval()
+        try:
+            with torch.inference_mode():
+                policy = torch.jit.trace(
+                    policy,
+                    torch.zeros((1, in_d), device=self.policy_device, dtype=torch.float32),
+                )
+            policy.eval()
+        except Exception:
+            pass
+        self._k1_recovery_policy = policy
+        print(f"[MultiRobotMotrixSim] K1 autonomous recovery policy: {path} ({in_d}->{out_d})")
+
     def _infer_policy_actions(self, obs_batch: np.ndarray) -> np.ndarray:
         if self._policy_is_onnx:
             ob = obs_batch.astype(np.float32, copy=False)
@@ -2060,6 +2099,13 @@ class MultiRobotMotrixSim:
             obs_tensor = torch.from_numpy(obs_batch.astype(np.float32, copy=False)).to(self.policy_device)
             return self._k1_stand_policy(obs_tensor).detach().cpu().numpy().astype(np.float32, copy=False)
 
+    def _infer_k1_recovery_actions(self, obs_batch: np.ndarray) -> np.ndarray:
+        if self._k1_recovery_policy is None:
+            raise RuntimeError("K1 recovery policy not loaded")
+        with torch.inference_mode():
+            obs_tensor = torch.from_numpy(obs_batch.astype(np.float32, copy=False)).to(self.policy_device)
+            return self._k1_recovery_policy(obs_tensor).detach().cpu().numpy().astype(np.float32, copy=False)
+
     def _k1_update_hybrid_walk_state(self, spec: RobotSpec, cmd: np.ndarray) -> None:
         vxy = float(np.hypot(float(cmd[0]), float(cmd[1])))
         wz = abs(float(cmd[2]))
@@ -2097,6 +2143,26 @@ class MultiRobotMotrixSim:
         obs_step = np.nan_to_num(obs_step, nan=0.0, posinf=0.0, neginf=0.0)
         c = float(self.robot_cfg.obs_clip)
         return np.clip(obs_step, -c, c)
+
+    def _obs_k1_recovery(self, spec: RobotSpec) -> np.ndarray:
+        previous = spec.last_action
+        if spec.k1_recovery_last_action is None:
+            spec.k1_recovery_last_action = np.zeros((K1_FULL_BODY_NUM_ACT,), dtype=np.float32)
+        pose_one_hot = np.zeros((3,), dtype=np.float32)
+        if spec.k1_recovery_pose == "SUPINE":
+            pose_one_hot[0] = 1.0
+        elif spec.k1_recovery_pose == "PRONE":
+            pose_one_hot[1] = 1.0
+        elif spec.k1_recovery_pose in ("LEFT", "RIGHT"):
+            pose_one_hot[2] = 1.0
+        spec.last_action = spec.k1_recovery_last_action
+        try:
+            return self._obs_k1_fullbody_for_hybrid(
+                spec,
+                cmd_override=pose_one_hot,
+            )
+        finally:
+            spec.last_action = previous
 
     def _build_robot_specs(self) -> dict[int, RobotSpec]:
         specs: dict[int, RobotSpec] = {}
@@ -2294,6 +2360,7 @@ class MultiRobotMotrixSim:
                 k1_amp_last_mjcf=k1_amp_last_mjcf,
                 k1_amp_gather_mjcf=k1_amp_gather_mjcf,
                 k1_amp_upper_mjcf=k1_amp_upper_mjcf,
+                k1_recovery_last_action=np.zeros((K1_FULL_BODY_NUM_ACT,), dtype=np.float32),
             )
         return specs
 
@@ -2309,14 +2376,28 @@ class MultiRobotMotrixSim:
         vx = float(vx)
         vy = float(vy)
         w = float(w)
-        if self.robot_cfg.cmd_clip is not None:
-            vx_lim, vy_lim, w_lim = self.robot_cfg.cmd_clip
+        is_blue = robot_id >= MAX_ROBOTS_PER_TEAM and self._has_blue_policy
+        cfg = self._blue_cfg if is_blue else self.robot_cfg
+        if cfg is not None and cfg.cmd_clip is not None:
+            vx_lim, vy_lim, w_lim = cfg.cmd_clip
             vx = float(np.clip(vx, -float(vx_lim), float(vx_lim)))
             vy = float(np.clip(vy, -float(vy_lim), float(vy_lim)))
             w = float(np.clip(w, -float(w_lim), float(w_lim)))
-        vx = float(np.clip(vx, CMD_VEL_NORM_MIN, CMD_VEL_NORM_MAX))
+        if (
+            cfg is not None
+            and cfg.robot_type == K1_ROBOT_TYPE
+            and cfg.k1_policy_flavor == K1_POLICY_FLAVOR_MOTRIXLAB
+        ):
+            # MotrixLab-trained policies accept wider angular-velocity range
+            # and forward-only linear velocity.  The strategic forward-yaw
+            # envelope is applied by the decider's CommandFilter; the sim
+            # only enforces absolute safety bounds.
+            w = float(np.clip(w, -1.5, 1.5))
+            vx = float(np.clip(vx, 0.0, 1.0))
+        else:
+            w = float(np.clip(w, CMD_VEL_NORM_MIN, CMD_VEL_NORM_MAX))
+            vx = float(np.clip(vx, CMD_VEL_NORM_MIN, CMD_VEL_NORM_MAX))
         vy = float(np.clip(vy, CMD_VEL_NORM_MIN, CMD_VEL_NORM_MAX))
-        w = float(np.clip(w, CMD_VEL_NORM_MIN, CMD_VEL_NORM_MAX))
         ts = float(timestamp) if timestamp else time.time()
         if ts < self.command_ts[robot_id]:
             return
@@ -2337,7 +2418,10 @@ class MultiRobotMotrixSim:
         Do **not** use (u+1)/2: that maps a single-axis command to biased values on the other axes
         (e.g. [0,0,ω] → [0.5,0.5,…]) and breaks axis decoupling in the policy.
         """
-        return np.clip(np.asarray(cmd, dtype=np.float32).reshape(3), CMD_VEL_NORM_MIN, CMD_VEL_NORM_MAX)
+        result = np.asarray(cmd, dtype=np.float32).reshape(3).copy()
+        result[:2] = np.clip(result[:2], CMD_VEL_NORM_MIN, CMD_VEL_NORM_MAX)
+        result[2] = np.clip(result[2], -1.5, 1.5)
+        return result
 
     def _obs_k1_legged_gym(self, spec: RobotSpec, cmd_override: np.ndarray | None = None,
                            policy_flavor: str | None = None) -> np.ndarray:
@@ -2572,8 +2656,166 @@ class MultiRobotMotrixSim:
         spec.obs_history[-spec.obs_step_dim :] = obs_step
         return np.clip(spec.obs_history, -self.robot_cfg.obs_clip, self.robot_cfg.obs_clip)
 
+    def _k1_recovery_pose(self, gravity: np.ndarray) -> str:
+        if abs(float(gravity[0])) >= abs(float(gravity[1])):
+            return "SUPINE" if gravity[0] > 0.0 else "PRONE"
+        return "LEFT" if gravity[1] > 0.0 else "RIGHT"
+
+    def _update_k1_recovery_states(self) -> None:
+        if self._k1_recovery_policy is None:
+            return
+        dt = float(self.robot_cfg.sim_dt * self.robot_cfg.control_decimation)
+        fall_frames = max(1, int(math.ceil(K1_FALL_DEBOUNCE_SEC / dt)))
+        attempt_frames = max(1, int(math.ceil(K1_RECOVERY_ATTEMPT_SEC / dt)))
+        stable_frames = max(1, int(math.ceil(K1_RECOVERY_STABLE_SEC / dt)))
+        failed_cooldown_frames = max(1, int(math.ceil(K1_RECOVERY_FAILED_COOLDOWN_SEC / dt)))
+        for spec in self.robot_specs.values():
+            # Only red-team (motrixlab flavor) robots use the autonomous
+            # recovery policy.  Blue team uses legged_gym flavor which has
+            # no get-up policy trained — they stay in LOCOMOTION.
+            if spec.rid >= MAX_ROBOTS_PER_TEAM:
+                continue
+            qpos = self.data.dof_pos[0]
+            qvel = self.data.dof_vel[0]
+            z = float(qpos[spec.base_qpos_adr + 2])
+            quat = qpos[spec.base_qpos_adr + 3 : spec.base_qpos_adr + 7]
+            rot_wb = _quat_to_rot_world_from_body(quat)
+            gravity = rot_wb.T @ np.array([0.0, 0.0, -1.0], dtype=np.float32)
+            tilt = float(np.linalg.norm(gravity[:2]))
+            ang_vel = float(
+                np.linalg.norm(qvel[spec.base_qvel_adr + 3 : spec.base_qvel_adr + 6])
+            )
+            fallen = z < 0.42 or tilt > 0.65
+            upright = z >= 0.50 and tilt <= 0.25 and ang_vel <= 0.50
+
+            if spec.k1_recovery_state in ("FALLEN", "RECOVERING", "STABILIZING"):
+                spec.k1_recovery_total_frames += 1
+            if spec.k1_recovery_state == "LOCOMOTION":
+                spec.k1_recovery_bad_frames = (
+                    spec.k1_recovery_bad_frames + 1 if fallen else 0
+                )
+                if spec.k1_recovery_bad_frames >= fall_frames:
+                    spec.k1_recovery_state = "FALLEN"
+                    spec.k1_recovery_pose = self._k1_recovery_pose(gravity)
+                    spec.k1_recovery_attempts = 1
+                    spec.k1_recovery_frames = 0
+                    spec.k1_recovery_total_frames = 0
+                    spec.k1_recovery_stable_frames = 0
+                    if spec.k1_recovery_last_action is not None:
+                        spec.k1_recovery_last_action.fill(0.0)
+            elif spec.k1_recovery_state == "FALLEN":
+                spec.k1_recovery_state = "RECOVERING"
+            elif spec.k1_recovery_state == "RECOVERING":
+                spec.k1_recovery_frames += 1
+                spec.k1_recovery_stable_frames = (
+                    spec.k1_recovery_stable_frames + 1 if upright else 0
+                )
+                if spec.k1_recovery_stable_frames >= max(1, stable_frames // 2):
+                    spec.k1_recovery_state = "STABILIZING"
+                    spec.k1_recovery_frames = 0
+                    spec.k1_recovery_stable_frames = 0
+                elif spec.k1_recovery_frames >= attempt_frames:
+                    if spec.k1_recovery_attempts >= K1_RECOVERY_MAX_ATTEMPTS:
+                        spec.k1_recovery_state = "FAILED"
+                    else:
+                        spec.k1_recovery_attempts += 1
+                        spec.k1_recovery_frames = 0
+                        spec.k1_recovery_pose = self._k1_recovery_pose(gravity)
+                        if spec.k1_recovery_last_action is not None:
+                            spec.k1_recovery_last_action.fill(0.0)
+            elif spec.k1_recovery_state == "STABILIZING":
+                if not upright:
+                    spec.k1_recovery_state = "RECOVERING"
+                    spec.k1_recovery_frames = 0
+                    spec.k1_recovery_stable_frames = 0
+                else:
+                    spec.k1_recovery_stable_frames += 1
+                    if spec.k1_recovery_stable_frames >= stable_frames:
+                        spec.k1_recovery_state = "LOCOMOTION"
+                        spec.k1_recovery_pose = ""
+                        spec.k1_recovery_bad_frames = 0
+                        spec.k1_recovery_frames = 0
+                        spec.k1_recovery_total_frames = 0
+                        spec.k1_recovery_stable_frames = 0
+                        spec.k1_recovery_attempts = 0
+                        spec.last_action.fill(0.0)
+                        if spec.k1_legged_last_action is not None:
+                            spec.k1_legged_last_action.fill(0.0)
+            elif spec.k1_recovery_state == "FAILED":
+                # After a cooldown, reset to LOCOMOTION so the robot gets
+                # another chance to play (even if it may still be on the ground).
+                spec.k1_recovery_total_frames += 1
+                if spec.k1_recovery_total_frames >= failed_cooldown_frames:
+                    spec.k1_recovery_state = "LOCOMOTION"
+                    spec.k1_recovery_pose = ""
+                    spec.k1_recovery_bad_frames = 0
+                    spec.k1_recovery_frames = 0
+                    spec.k1_recovery_total_frames = 0
+                    spec.k1_recovery_stable_frames = 0
+                    spec.k1_recovery_attempts = 0
+                    spec.last_action.fill(0.0)
+                    if spec.k1_legged_last_action is not None:
+                        spec.k1_legged_last_action.fill(0.0)
+
+    def _apply_k1_recovery_overrides(self) -> None:
+        if self._k1_recovery_policy is None:
+            return
+        # Only red-team robots use the autonomous recovery policy (see
+        # _update_k1_recovery_states for rationale).
+        active_specs = [
+            spec
+            for spec in self.robot_specs.values()
+            if spec.rid < MAX_ROBOTS_PER_TEAM
+            and spec.k1_recovery_state in ("FALLEN", "RECOVERING", "STABILIZING")
+        ]
+        actions_by_spec = []
+        if active_specs:
+            observations = np.stack(
+                [self._obs_k1_recovery(spec) for spec in active_specs],
+                axis=0,
+            )
+            actions = self._infer_k1_recovery_actions(observations)
+            if actions.ndim == 1:
+                actions = actions.reshape(1, -1)
+            actions_by_spec.extend(zip(active_specs, actions))
+
+        failed_specs = [
+            spec
+            for spec in self.robot_specs.values()
+            if spec.rid < MAX_ROBOTS_PER_TEAM
+            and spec.k1_recovery_state == "FAILED"
+        ]
+        for spec in failed_specs:
+            action = spec.k1_recovery_last_action
+            if action is None:
+                action = np.zeros((K1_FULL_BODY_NUM_ACT,), dtype=np.float32)
+            actions_by_spec.append((spec, action))
+
+        for spec, action in actions_by_spec:
+            action = np.nan_to_num(
+                action,
+                nan=0.0,
+                posinf=0.0,
+                neginf=0.0,
+            ).astype(np.float32)
+            action = np.clip(action, -1.0, 1.0)
+            if spec.k1_recovery_last_action is None:
+                spec.k1_recovery_last_action = np.zeros((K1_FULL_BODY_NUM_ACT,), dtype=np.float32)
+            spec.k1_recovery_last_action[:] = action
+            spec.last_action[:] = action
+            target = spec.init_angles + np.clip(
+                action * spec.action_scale,
+                ACTION_CLIP[0],
+                ACTION_CLIP[1],
+            )
+            if spec.joint_lower is not None and spec.joint_upper is not None:
+                target = np.clip(target, spec.joint_lower, spec.joint_upper)
+            spec.filtered_dof_target[:] = target
+            spec.target_joint_pos[:] = target
+
     def _compute_targets(self):
         self._policy_step_count += 1
+        self._update_k1_recovery_states()
         debug_rid = FIXED_ROBOT_NAME_TO_ID.get("robot_rp0")
         if debug_rid not in self.robot_specs:
             debug_rid = next(iter(self.robot_specs.keys()), None)
@@ -2813,6 +3055,7 @@ class MultiRobotMotrixSim:
                         np.clip(spec.filtered_dof_target, spec.joint_lower, spec.joint_upper, out=spec.filtered_dof_target)
                     spec.target_joint_pos[:] = spec.filtered_dof_target
 
+        self._apply_k1_recovery_overrides()
         self._maybe_print_policy_debug(debug_rid, debug_obs, debug_act)
 
     def _maybe_print_policy_debug(
@@ -3125,6 +3368,15 @@ class MultiRobotMotrixSim:
             spec.k1_legged_last_action[:] = 0.0
         if spec.k1_gait_phase is not None:
             spec.k1_gait_phase = 0.0
+        if spec.k1_recovery_last_action is not None:
+            spec.k1_recovery_last_action.fill(0.0)
+        spec.k1_recovery_state = "LOCOMOTION"
+        spec.k1_recovery_pose = ""
+        spec.k1_recovery_bad_frames = 0
+        spec.k1_recovery_frames = 0
+        spec.k1_recovery_total_frames = 0
+        spec.k1_recovery_stable_frames = 0
+        spec.k1_recovery_attempts = 0
         spec.k1_hybrid_walking = False
         spec.filtered_dof_target[:] = spec.init_angles
         spec.target_joint_pos[:] = spec.init_angles
@@ -3357,6 +3609,9 @@ class MultiRobotMotrixSim:
                 y = float(self.data.dof_pos[0][spec.base_qpos_adr + 1])
                 z = float(self.data.dof_pos[0][spec.base_qpos_adr + 2])
                 quat = self.data.dof_pos[0][spec.base_qpos_adr + 3 : spec.base_qpos_adr + 7]
+                gravity = _quat_to_rot_world_from_body(quat).T @ np.array(
+                    [0.0, 0.0, -1.0], dtype=np.float32
+                )
                 cmd = self.command_buffer.get(rid, np.array(DEFAULT_CMD, dtype=np.float32))
                 states[name] = {
                     "x": x,
@@ -3366,6 +3621,13 @@ class MultiRobotMotrixSim:
                     "active": True,
                     "team": spec.team,
                     "cmd_vel": [float(cmd[0]), float(cmd[1]), float(cmd[2])],
+                    "tilt": float(np.linalg.norm(gravity[:2])),
+                    "recovery_state": spec.k1_recovery_state,
+                    "recovery_pose": spec.k1_recovery_pose,
+                    "recovery_attempts": spec.k1_recovery_attempts,
+                    "recovery_elapsed": spec.k1_recovery_total_frames
+                    * self.robot_cfg.sim_dt
+                    * self.robot_cfg.control_decimation,
                 }
             else:
                 states[name] = {
@@ -3376,6 +3638,11 @@ class MultiRobotMotrixSim:
                     "active": False,
                     "team": "red" if rid < MAX_ROBOTS_PER_TEAM else "blue",
                     "cmd_vel": [0.0, 0.0, 0.0],
+                    "tilt": 0.0,
+                    "recovery_state": "INACTIVE",
+                    "recovery_pose": "",
+                    "recovery_attempts": 0,
+                    "recovery_elapsed": 0.0,
                 }
 
         ball_x, ball_y, ball_z = 0.0, 0.0, 0.075
@@ -3468,15 +3735,27 @@ class MultiRobotMotrixSim:
             spec = self.robot_specs[rid]
             x = float(self.data.dof_pos[0][spec.base_qpos_adr + 0])
             y = float(self.data.dof_pos[0][spec.base_qpos_adr + 1])
+            z = float(self.data.dof_pos[0][spec.base_qpos_adr + 2])
             quat = self.data.dof_pos[0][spec.base_qpos_adr + 3 : spec.base_qpos_adr + 7]
+            gravity = _quat_to_rot_world_from_body(quat).T @ np.array(
+                [0.0, 0.0, -1.0], dtype=np.float32
+            )
             robots.append(
                 {
                     "id": rid,
                     "name": spec.name,
                     "x": x,
                     "y": y,
+                    "z": z,
                     "theta": self._yaw_from_quat(quat),
                     "team": spec.team,
+                    "tilt": float(np.linalg.norm(gravity[:2])),
+                    "recovery_state": spec.k1_recovery_state,
+                    "recovery_pose": spec.k1_recovery_pose,
+                    "recovery_attempts": spec.k1_recovery_attempts,
+                    "recovery_elapsed": spec.k1_recovery_total_frames
+                    * self.robot_cfg.sim_dt
+                    * self.robot_cfg.control_decimation,
                 }
             )
 

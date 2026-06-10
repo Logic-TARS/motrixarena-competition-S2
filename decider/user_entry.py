@@ -769,6 +769,7 @@ class DeciderFSM:
     DRIBBLE           – push the ball toward the opponent goal.
     KICK              – execute a single kick, then wait.
     RECOVER           – brief pause after kicking to re-observe.
+    FALL_RECOVERY      – suspend football behavior while the get-up policy runs.
 
     Hysteresis
     ----------
@@ -940,12 +941,26 @@ class DeciderFSM:
             # Positioning transitions preserve filter state. A controller that
             # needs pure rotation requests TURN_ONLY and passes through BRAKE.
             if new_state in ("STOP", "SEARCH_BALL", "RECOVER",
-                             "RETURN_TO_FIELD", "KICK"):
+                             "RETURN_TO_FIELD", "KICK", "FALL_RECOVERY"):
                 self.cmd_filter.reset()
 
     def tick(self):
         """Run one frame of the decision FSM.  Returns (vx, vy, w)."""
         self._frame_counter += 1
+
+        get_recovery_state = getattr(self.agent, "get_recovery_state", None)
+        recovery_state = (
+            get_recovery_state() if callable(get_recovery_state) else "LOCOMOTION"
+        )
+        # FAILED and INACTIVE are terminal recovery states — the sim-side
+        # get-up policy cannot (or is not configured to) recover the robot.
+        # Treat them the same as LOCOMOTION so the decider resumes football
+        # behaviour instead of deadlocking in FALL_RECOVERY forever.
+        if recovery_state not in ("LOCOMOTION", "FAILED", "INACTIVE"):
+            self.switch("FALL_RECOVERY")
+            return self._emit(0.0, 0.0, 0.0, brake=True)
+        if self.state == "FALL_RECOVERY":
+            self.switch("SEARCH_BALL")
 
         # 1. Update ball visibility counters --------------------------
         if self.agent.get_if_ball():
