@@ -10,6 +10,7 @@ TEAM_SIZE="${TEAM_SIZE:-1}"
 REAL_TIME="--real-time"
 POLICY_ARG="--policy $REPO_ROOT/MotrixLab/runs/k1-flat-terrain-walk/rslrl/26-06-08_21-37-09-_386985_PPO/model_1350.pt"
 BLUE_POLICY_ARG=""
+RECOVERY_POLICY_ARG=""
 COLOR="${COLOR:-red}"
 ROBOT_ID="${ROBOT_ID:-0}"
 FIXED_CMD="--sim-fixed-cmd 0.5,0,0"   # default: straight-line walk test
@@ -32,6 +33,7 @@ parse_args() {
             --no-real-time)    REAL_TIME="--no-real-time"; shift ;;
             --policy)          POLICY_ARG="--policy $2"; shift 2 ;;
             --blue-policy)     BLUE_POLICY_ARG="--blue-policy $2 --blue-policy-flavor legged_gym"; shift 2 ;;
+            --recovery-policy) RECOVERY_POLICY_ARG="--k1-recovery-policy $2"; shift 2 ;;
             --color)           COLOR="$2"; shift 2 ;;
             --id)              ROBOT_ID="$2"; shift 2 ;;
             --play)            FIXED_CMD="";
@@ -81,6 +83,7 @@ launch_sim() {
         $REFEREE_ARG \
         $REFEREE_STATE_ARG \
         $POLICY_ARG \
+        $RECOVERY_POLICY_ARG \
         $BLUE_POLICY_ARG \
         $SIM_EXTRA &
     SIM_PID=$!

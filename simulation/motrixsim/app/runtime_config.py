@@ -466,6 +466,7 @@ class RobotRuntimeConfig:
     k1_stand_policy: Path | None = None
     use_k1_amp_onnx: bool = False
     k1_policy_flavor: str = K1_POLICY_FLAVOR_LEGGED_GYM
+    k1_recovery_policy: Path | None = None
 
 
 @dataclass
@@ -601,6 +602,7 @@ def build_robot_runtime_config(
     robot_xml_override: Path | None,
     use_k1_legged_gym: bool = True,
     k1_policy_flavor: str = K1_POLICY_FLAVOR_MOTRIXLAB,
+    k1_recovery_policy: Path | None = None,
 ) -> RobotRuntimeConfig:
     rt = _normalize_robot_type(robot_type)
     if rt == K1_ROBOT_TYPE:
@@ -715,6 +717,7 @@ def build_robot_runtime_config(
             k1_stand_policy=None if use_k1_amp_onnx else k1_stand_policy,
             use_k1_amp_onnx=use_k1_amp_onnx,
             k1_policy_flavor=k1_policy_flavor,
+            k1_recovery_policy=k1_recovery_policy,
         )
     return RobotRuntimeConfig(
         robot_type=PI_PLUS_ROBOT_TYPE,
@@ -746,6 +749,7 @@ def build_robot_runtime_config(
         k1_stand_policy=None,
         use_k1_amp_onnx=False,
         k1_policy_flavor=K1_POLICY_FLAVOR_LEGGED_GYM,
+        k1_recovery_policy=None,
     )
 
 
@@ -841,6 +845,12 @@ def parse_runtime_args(mujoco_dir: Path) -> RuntimeArgs:
         "MotrixLab/motrix_envs k1-flat-terrain-walk; keep 'legged_gym' for legacy T1/legged_gym models.",
     )
     parser.add_argument(
+        "--k1-recovery-policy",
+        type=Path,
+        default=None,
+        help="K1 only: 78->22 full-body autonomous get-up policy.",
+    )
+    parser.add_argument(
         "--blue-policy",
         type=Path,
         default=None,
@@ -890,6 +900,7 @@ def parse_runtime_args(mujoco_dir: Path) -> RuntimeArgs:
         robot_xml_override=ns.robot_xml,
         use_k1_legged_gym=ns.k1_legged_gym,
         k1_policy_flavor=ns.k1_policy_flavor,
+        k1_recovery_policy=ns.k1_recovery_policy,
     )
 
     # --- blue team config (defaults to legged_gym model_4700.pt) ---
@@ -905,6 +916,7 @@ def parse_runtime_args(mujoco_dir: Path) -> RuntimeArgs:
         robot_xml_override=ns.robot_xml,
         use_k1_legged_gym=_blue_legged,
         k1_policy_flavor=_blue_flavor,
+        k1_recovery_policy=None,
     )
 
     return RuntimeArgs(

@@ -12,6 +12,7 @@ REAL_TIME="--real-time"
 # Use exported TorchScript model (with built-in EmpiricalNormalization from RSLRL training)
 POLICY_ARG="--policy $REPO_ROOT/MotrixLab/exported/model_1350_torchscript.pt"
 BLUE_POLICY_ARG=""
+RECOVERY_POLICY_ARG=""
 RECORD_ARG=""
 
 while [[ $# -gt 0 ]]; do
@@ -20,6 +21,7 @@ while [[ $# -gt 0 ]]; do
         --no-real-time) REAL_TIME="--no-real-time"; shift ;;
         --policy) POLICY_ARG="--policy $2"; shift 2 ;;
         --blue-policy) BLUE_POLICY_ARG="--blue-policy $2 --blue-policy-flavor legged_gym"; shift 2 ;;
+        --recovery-policy) RECOVERY_POLICY_ARG="--k1-recovery-policy $2"; shift 2 ;;
         --record-video) RECORD_ARG="--record-video $2"; shift 2 ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
@@ -50,5 +52,6 @@ exec uv run --directory "$REPO_ROOT/MotrixLab" python -u -m app.runner \
     --team-size "$TEAM_SIZE" \
     $REAL_TIME \
     $POLICY_ARG \
+    $RECOVERY_POLICY_ARG \
     $BLUE_POLICY_ARG \
     $RECORD_ARG
