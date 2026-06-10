@@ -68,7 +68,9 @@ The "Simulation Acceptance Criteria" are the final hurdle before submission. Eve
 1. **Dimension Verification:**  Use onnxruntime to confirm single-input/single-output shapes of N, 375 and N, 22\.  
 2. **Runtime Integrity:**  The Decider must demonstrate continuous state reception and cmd issuance without memory leaks or stack overflows over a 20-minute test loop.  
 3. **Physical Verification:**  Use the \--policy flag to point to the model's absolute path and confirm the robot can maintain posture/walk using the \--k1-legged-gym switch.  
-4. **The Clean Machine Test:**  Reproduce the entire setup on a secondary, isolated machine using only the provided documentation and pip install \-r requirements.txt. If the setup is not reproducible in one step, it is rejected.
+4. **Autonomous Fall-Recovery Test:**  Force front, back, and side falls and confirm that the submitted policy begins a stand-up attempt within 20 seconds, detects success or failure, limits failure handling to 3 consecutive attempts, and resumes locomotion after standing. Simulator-side teleportation or unconditional pose reset must be disabled for this test.
+5. **Penalty and Return Test:**  Confirm that an Incapable Robot is removed for an initial 30-second penalty, that repeated violations accumulate penalty time, and that the released robot autonomously returns to the field.
+6. **The Clean Machine Test:**  Reproduce the entire setup on a secondary, isolated machine using only the provided documentation and pip install \-r requirements.txt. If the setup is not reproducible in one step, it is rejected.
 
 #### 6\. Competition Roadmap & Milestone Management
 
@@ -94,7 +96,7 @@ All submissions must include a clear README\_Gait.md and exclude private tokens,
 
 1. **Autonomous Control:**  Zero manual intervention during match play.  
 2. **Multi-machine Coordination:**  Effective 3-unit tactical synchronization.  
-3. **Model Robustness:**  Stability across diverse adversarial scenarios and the 10-minute shootout burst.**Engineering Lead Note:**  Adherence to these standards is mandatory to secure the Booster K1 Geek Edition grand prize. Focus on robustness; the simulation rewards stability over reckless speed.\# Technical Development & Participation Plan: MotrixArena S2 (Scheme A Implementation)
+3. **Model Robustness:**  Stability across diverse adversarial scenarios, autonomous stand-up within the competition limits, and the 10-minute shootout burst.**Engineering Lead Note:**  Adherence to these standards is mandatory to secure the Booster K1 Geek Edition grand prize. Focus on robustness; the simulation rewards stability over reckless speed.\# Technical Development & Participation Plan: MotrixArena S2 (Scheme A Implementation)
 
 #### 1\. Executive Strategic Context
 
@@ -164,7 +166,9 @@ The "Simulation Acceptance Criteria" are the final hurdle before submission. Eve
 1. **Dimension Verification:**  Use onnxruntime to confirm single-input/single-output shapes of N, 375 and N, 22\.  
 2. **Runtime Integrity:**  The Decider must demonstrate continuous state reception and cmd issuance without memory leaks or stack overflows over a 20-minute test loop.  
 3. **Physical Verification:**  Use the \--policy flag to point to the model's absolute path and confirm the robot can maintain posture/walk using the \--k1-legged-gym switch.  
-4. **The Clean Machine Test:**  Reproduce the entire setup on a secondary, isolated machine using only the provided documentation and pip install \-r requirements.txt. If the setup is not reproducible in one step, it is rejected.
+4. **Autonomous Fall-Recovery Test:**  Force front, back, and side falls and confirm that the submitted policy begins a stand-up attempt within 20 seconds, detects success or failure, limits failure handling to 3 consecutive attempts, and resumes locomotion after standing. Simulator-side teleportation or unconditional pose reset must be disabled for this test.
+5. **Penalty and Return Test:**  Confirm that an Incapable Robot is removed for an initial 30-second penalty, that repeated violations accumulate penalty time, and that the released robot autonomously returns to the field.
+6. **The Clean Machine Test:**  Reproduce the entire setup on a secondary, isolated machine using only the provided documentation and pip install \-r requirements.txt. If the setup is not reproducible in one step, it is rejected.
 
 #### 6\. Competition Roadmap & Milestone Management
 
@@ -190,5 +194,4 @@ All submissions must include a clear README\_Gait.md and exclude private tokens,
 
 1. **Autonomous Control:**  Zero manual intervention during match play.  
 2. **Multi-machine Coordination:**  Effective 3-unit tactical synchronization.  
-3. **Model Robustness:**  Stability across diverse adversarial scenarios and the 10-minute shootout burst.**Engineering Lead Note:**  Adherence to these standards is mandatory to secure the Booster K1 Geek Edition grand prize. Focus on robustness; the simulation rewards stability over reckless speed.
-
+3. **Model Robustness:**  Stability across diverse adversarial scenarios, autonomous stand-up within the competition limits, and the 10-minute shootout burst.**Engineering Lead Note:**  Adherence to these standards is mandatory to secure the Booster K1 Geek Edition grand prize. Focus on robustness; the simulation rewards stability over reckless speed.

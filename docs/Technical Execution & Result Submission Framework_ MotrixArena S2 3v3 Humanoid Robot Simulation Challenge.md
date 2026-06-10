@@ -43,6 +43,18 @@ The submission process acts as the critical interface between the developer's lo
 Matches are structured as two 10-minute halves within a 3v3 format, designed to stress-test both individual agent control and collective tactical synchronization. In the event of a tie during elimination rounds, teams enter a  **10-minute high-frequency penalty shootout** . This high-frequency format is specifically intended to stress-test the rapid reset capabilities and response cycles of the RL agents under extreme pressure.Evaluation is conducted across three fundamental dimensions:| Dimension | Definition | Strategic Impact || \------ | \------ | \------ || **Autonomous Control** | Maneuvering (walking, running, kicking) without manual intervention. | Determines the fundamental mobility and reliability of the individual agent. || **Multi-robot Coordination** | Tactical cooperation, passing, and formation synchronization. | Acts as the primary differentiator in elite play; determines team efficiency. || **Model Robustness** | Algorithmic stability across varying adversarial scenarios. | Ensures functional stability against diverse and unpredictable opponent strategies. |  
 This multi-dimensional rubric ensures that the ultimate champion demonstrates a comprehensive mastery of embodied intelligence.
 
+##### Fall Recovery and Incapable Robot Rule
+
+Fall recovery is a mandatory autonomous capability and a core part of the model-robustness assessment. A fallen robot must use the submitted competition policy to recover and stand up; simulator-side teleportation, unconditional pose reset, or manual intervention must not substitute for the recovery behavior.
+
+* The robot must attempt to stand within **20 seconds** after a fall.
+* A robot that does not attempt to stand within 20 seconds, or fails **3 consecutive stand-up attempts**, is declared an **Incapable Robot**.
+* An Incapable Robot receives the standard removal penalty (**Penalized**) and is removed from the field immediately.
+* The initial penalty duration is **30 seconds**. Repeated violations accumulate additional penalty time.
+* After the penalty expires, the robot must autonomously return to the field and resume play.
+
+In elimination-stage dual-track evaluation, flexible and visually expressive recovery behaviors, including rolling stand-up motions, may also contribute to the audience-voted presentation assessment.
+
 #### 6\. Qualification Standards & Team Composition
 
 The MotrixArena S2 maintains high technical benchmarks by curating a diverse and elite participant pool.
@@ -63,4 +75,3 @@ The incentive model for MotrixArena S2 is designed to reinvest in the humanoid r
 * **4th Place:**  1x Mechanical Keyboard, 1x Deep RL Textbook, 3000  **DiGua Gan** , and Certificate.  
 * **7th Place:**  1x Mechanical Keyboard, 1000  **DiGua Gan** , and Certificate.  
 * **8th Place:**  1x Deep RL Textbook, 1x Motphys Branded Cup, 1500  **DiGua Gan** , and Certificate.With a total prize pool featuring hardware valued at approximately  **¥99,800**  (with individual K1 robots valued at ¥49,900), MotrixArena S2 offers more than just accolades; it provides the essential tools for the next generation of AI pioneers to advance the future of humanoid robotics.
-

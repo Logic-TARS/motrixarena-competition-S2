@@ -399,9 +399,6 @@ FIELD_PRESETS = {
 
 DRAG_RESET_PROTECT_SEC = 0.5
 DRAG_CMD_ZERO_POLICY_FRAMES = 5
-FALL_RESET_PROTECT_SEC = 1.5
-FALL_UPRIGHT_DOT_MIN = 0.2
-FALL_CONFIRM_FRAMES = 10
 
 # Extra root height when instantiating robots in the merged scene (meters).
 # Helps avoid initial penetrations with non-planar or thick floor collision (e.g. mesh stadium).
@@ -1628,8 +1625,6 @@ class MultiRobotMotrixSim:
         self._robot_protect_until: dict[int, float] = {}
         self._robot_protect_pose: dict[int, tuple[float, float, float]] = {}
         self._robot_cmd_zero_frames_left: dict[int, int] = {}
-        self._fall_candidate_frames: dict[int, int] = {}
-        self._enable_fall_recovery = True
         self._ball_last_touch_rid: int | None = None
 
         self.use_referee = bool(args.use_referee)
@@ -2800,9 +2795,6 @@ class MultiRobotMotrixSim:
         post_hold_changed = self._apply_robot_protection_holds()
         if post_hold_changed:
             self.model.forward_kinematic(self.data)
-        fall_recovered = self._recover_fallen_robots() if self._enable_fall_recovery else False
-        if fall_recovered:
-            self.model.forward_kinematic(self.data)
         if (
             not np.isfinite(self.data.dof_pos).all()
             or not np.isfinite(self.data.dof_vel).all()
@@ -2895,44 +2887,6 @@ class MultiRobotMotrixSim:
             return None
         return min(active)
 
-    def _recover_fallen_robots(self) -> bool:
-        changed = False
-        now = time.monotonic()
-        for rid, spec in self.robot_specs.items():
-            if self._is_robot_protected(rid):
-                self._fall_candidate_frames[rid] = 0
-                continue
-            base_z = float(self.data.dof_pos[0, spec.base_qpos_adr + 2])
-            startup_z = float(self._startup_qpos[spec.base_qpos_adr + 2])
-            # Only trigger auto-recovery when the robot is both tilted and clearly low.
-            # This avoids repeated false recoveries for walking/leaning states.
-            low_z_gate = max(0.45, startup_z - 0.25)
-            if not np.isfinite(base_z) or base_z > low_z_gate:
-                self._fall_candidate_frames[rid] = 0
-                continue
-            quat = self.data.dof_pos[0][spec.base_qpos_adr + 3 : spec.base_qpos_adr + 7]
-            rot_wb = _quat_to_rot_world_from_body(quat)
-            upright_dot = float(rot_wb[2, 2])
-            if not np.isfinite(upright_dot) or upright_dot >= FALL_UPRIGHT_DOT_MIN:
-                self._fall_candidate_frames[rid] = 0
-                continue
-            fallen_frames = int(self._fall_candidate_frames.get(rid, 0)) + 1
-            self._fall_candidate_frames[rid] = fallen_frames
-            if fallen_frames < FALL_CONFIRM_FRAMES:
-                continue
-            self._fall_candidate_frames[rid] = 0
-            x = float(self.data.dof_pos[0][spec.base_qpos_adr + 0])
-            y = float(self.data.dof_pos[0][spec.base_qpos_adr + 1])
-            theta = float(self._yaw_from_quat(quat))
-            self._robot_protect_pose[rid] = (x, y, theta)
-            self._robot_protect_until[rid] = now + FALL_RESET_PROTECT_SEC
-            self._robot_cmd_zero_frames_left[rid] = max(
-                int(self._robot_cmd_zero_frames_left.get(rid, 0)),
-                DRAG_CMD_ZERO_POLICY_FRAMES,
-            )
-            self._hold_robot_at_reset_pose(spec, x, y, theta)
-            changed = True
-        return changed
 
     def _update_referee(self, dt: float):
         if self.referee is None:
@@ -3114,7 +3068,6 @@ class MultiRobotMotrixSim:
         self._robot_protect_until.clear()
         self._robot_protect_pose.clear()
         self._robot_cmd_zero_frames_left.clear()
-        self._fall_candidate_frames.clear()
         self._ball_last_touch_rid = None
         if reset_referee and self.referee is not None:
             self.referee.reset()
