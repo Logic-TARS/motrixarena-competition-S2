@@ -75,18 +75,20 @@ class K1GetupTask(NpEnv):
     @staticmethod
     def _joint_action_scale(name: str) -> float:
         if "Head" in name:
-            return 0.375
+            return 0.5
         if "Shoulder" in name or "Elbow" in name:
-            return 0.875
+            return 1.5
         if "Hip_Pitch" in name:
-            return 0.09375
+            return 1.2
         if "Hip_Roll" in name:
-            return 0.109375
+            return 0.8
         if "Hip_Yaw" in name:
-            return 0.0625
+            return 0.8
         if "Knee_Pitch" in name:
-            return 0.125
-        return 1.0 / 6.0
+            return 2.0
+        if "Ankle" in name:
+            return 0.8
+        return 1.0
 
     @staticmethod
     def _joint_kp(name: str) -> float:
@@ -259,14 +261,25 @@ class K1GetupTask(NpEnv):
         target = self._key_poses[stage]
         joint_error = np.mean(np.square(self.get_joint_pos(state.data) - target), axis=1)
         cfg = self.cfg.reward_config
+        upright_score = np.clip(-gravity[:, 2], 0.0, 1.0)
+        height_progress = np.clip(
+            (pose[:, 2] - self.cfg.reset_config.base_height)
+            / max(cfg.target_height - self.cfg.reset_config.base_height, 1.0e-5),
+            0.0,
+            1.0,
+        )
+        stand_progress = upright_score * height_progress
+        pose_gate = 0.2 + 0.8 * height_progress
         reward = (
-            cfg.upright * np.square(np.clip(-gravity[:, 2], 0.0, 1.0))
-            + cfg.height * np.clip(pose[:, 2] / cfg.target_height, 0.0, 1.0)
-            + cfg.target_pose * np.exp(-2.0 * joint_error)
-            + cfg.stability * np.exp(-np.sum(np.square(local_ang), axis=1))
+            cfg.stand_progress * np.square(stand_progress)
+            + cfg.height * np.square(height_progress)
+            + cfg.upright * np.square(upright_score) * height_progress
+            + cfg.target_pose * pose_gate * np.exp(-2.0 * joint_error)
+            + cfg.stability * height_progress * np.exp(-np.sum(np.square(local_ang), axis=1))
             + cfg.action_rate
             * np.sum(np.square(state.info["current_actions"] - state.info["last_actions"]), axis=1)
             + cfg.torque * np.sum(np.square(state.data.actuator_ctrls), axis=1)
+            + cfg.time
         ) * self.cfg.ctrl_dt
         reward += newly_successful.astype(np.float32) * cfg.success_bonus
         state.info["success"] = success.astype(np.float32)

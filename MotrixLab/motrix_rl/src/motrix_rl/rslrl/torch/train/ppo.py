@@ -19,6 +19,7 @@ import logging
 
 import numpy as np
 import torch
+from torch.distributions import Normal
 from rsl_rl.runners import OnPolicyRunner
 
 from motrix_envs import registry as env_registry
@@ -29,6 +30,46 @@ from motrix_rl.rslrl.torch.wrap_vec_env import RslrlNpEnvWrap
 from motrix_rl.skrl import get_log_dir
 
 logger = logging.getLogger(__name__)
+
+
+def _patch_rslrl_scalar_std_floor(min_std: float = 1.0e-4) -> None:
+    """Prevent scalar exploration std from crossing zero during PPO updates.
+
+    rsl_rl's MLPModel supports `noise_std_type="scalar"` as a directly
+    trainable standard deviation. On difficult tasks that parameter can be
+    optimized below zero, and torch.distributions.Normal then crashes while
+    sampling. Keep checkpoint compatibility with scalar-std actors by flooring
+    the value at distribution construction time.
+    """
+    from rsl_rl.models.mlp_model import MLPModel
+
+    if getattr(MLPModel, "_motrix_scalar_std_floor_patched", False):
+        return
+
+    def _update_distribution(self, obs: torch.Tensor) -> None:
+        if self.state_dependent_std:
+            mean_and_std = self.mlp(obs)
+            if self.noise_std_type == "scalar":
+                mean, std = torch.unbind(mean_and_std, dim=-2)
+                std = torch.clamp(std, min=min_std)
+            elif self.noise_std_type == "log":
+                mean, log_std = torch.unbind(mean_and_std, dim=-2)
+                std = torch.exp(log_std)
+            else:
+                raise ValueError(f"Unknown standard deviation type: {self.noise_std_type}. Should be 'scalar' or 'log'")
+        else:
+            mean = self.mlp(obs)
+            if self.noise_std_type == "scalar":
+                self.std.data.clamp_(min=min_std)
+                std = self.std.expand_as(mean)
+            elif self.noise_std_type == "log":
+                std = torch.exp(self.log_std).expand_as(mean)
+            else:
+                raise ValueError(f"Unknown standard deviation type: {self.noise_std_type}. Should be 'scalar' or 'log'")
+        self.distribution = Normal(mean, std)
+
+    MLPModel._update_distribution = _update_distribution
+    MLPModel._motrix_scalar_std_floor_patched = True
 
 
 class Trainer:
@@ -77,6 +118,7 @@ class Trainer:
 
         Creates the environment, wraps it for RSLRL, and runs the training loop.
         """
+        _patch_rslrl_scalar_std_floor()
         rlcfg = self._rlcfg
 
         # Create environment

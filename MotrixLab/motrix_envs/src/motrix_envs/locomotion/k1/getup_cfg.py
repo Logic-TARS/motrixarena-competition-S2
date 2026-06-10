@@ -40,7 +40,7 @@ class GetupControlConfig:
 
 @dataclass
 class GetupResetConfig:
-    base_height: float = 0.22
+    base_height: float = 0.30
     joint_noise: float = 0.12
     linear_velocity: float = 0.15
     angular_velocity: float = 0.35
@@ -49,12 +49,14 @@ class GetupResetConfig:
 
 @dataclass
 class GetupRewardConfig:
-    upright: float = 4.0
-    height: float = 3.0
-    target_pose: float = 2.0
+    stand_progress: float = 8.0
+    height: float = 2.0
+    upright: float = 2.0
+    target_pose: float = 0.75
     stability: float = 0.5
     action_rate: float = -0.02
     torque: float = -2.0e-5
+    time: float = -0.35
     success_bonus: float = 20.0
     target_height: float = 0.54
     success_height: float = 0.50
