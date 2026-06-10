@@ -68,6 +68,7 @@ Key CLI flags for `runner.py` / `sim2sim_runner.py`:
 - `--policy-debug` / `--no-policy-debug` — print periodic policy diagnostics (obs/act ranges, cmd, base height, timing)
 - `--policy-debug-interval N` — control frames between `--policy-debug` print lines (default: 50)
 - `--blue-policy PATH` / `--blue-policy-flavor FLAVOR` — different policy for blue team
+- `--k1-recovery-policy PATH` — autonomous get-up policy for fall recovery
 
 ### Start a Single Decider
 ```bash
@@ -120,7 +121,7 @@ uv run scripts/view.py --env cartpole          # visualize
 uv run pytest                                  # run tests
 ```
 
-Available K1 environment names: `k1-flat-terrain-walk`, `k1-point-navigation`, `k1-ball-navigation`, `k1-amp-walk`, `k1-amp-walk-small`, `k1-amp-walk-lift`.
+Available K1 environment names: `k1-flat-terrain-walk` (47→12 leg locomotion), `k1-getup` (78→22 full-body recovery).
 
 **Important `train.py` flags:**
 - `--rllib skrl|rslrl` — RL framework (default: `skrl`). RSLRL is required for K1 walk training.
@@ -133,9 +134,10 @@ Available K1 environment names: `k1-flat-terrain-walk`, `k1-point-navigation`, `
 ### K1 Walk Training (via shell wrapper)
 ```bash
 cd MotrixLab
-bash scripts/train_k1.sh                          # RSLRL, 4096 envs, seed 1
-bash scripts/train_k1.sh --resume-policy PATH     # resume from checkpoint
+bash scripts/train_k1_robust_walk.sh              # RSLRL, 4096 envs, resume from model_1350
+bash scripts/train_k1_getup.sh                    # RSLRL, 2048 envs, train getup from scratch
 ```
+See `docs/K1_DUAL_MACHINE_TRAINING.md` for dual-machine setup and `docs/K1_ROBUST_WALK_TRAINING.md` for walk-specific details.
 
 ### K1 Model Export (REQUIRED for simulation)
 **RSLRL checkpoints CANNOT be used directly in the soccer simulation.** The checkpoint lacks the `EmpiricalNormalization` module that training baked into the model (`obs_normalization=True`). You must export to TorchScript first:
