@@ -254,6 +254,7 @@ K1_AMP_ACTUATOR_JOINT_ORDER = [
     "Right_Ankle_Pitch",
     "Right_Ankle_Roll",
 ]
+K1_AMP_UPPER_BODY_JOINTS = set(K1_AMP_ACTUATOR_JOINT_ORDER[:10])
 K1_AMP_DEFAULT_JOINT_ANGLES = {
     "AAHead_yaw": 0.0,
     "Head_pitch": 0.0,
@@ -346,6 +347,72 @@ K1_LEGGED_GYM_KD = {
     "Right_Ankle_Roll": 1.0,
 }
 
+# MotrixLab/motrix_envs K1 walk_np policy constants. This policy is also 47->12,
+# but its observation layout and action-to-target scaling differ from legged_gym/T1.
+K1_POLICY_FLAVOR_LEGGED_GYM = "legged_gym"
+K1_POLICY_FLAVOR_MOTRIXLAB = "motrixlab"
+K1_POLICY_FLAVORS = (K1_POLICY_FLAVOR_LEGGED_GYM, K1_POLICY_FLAVOR_MOTRIXLAB)
+K1_MOTRIXLAB_CMD_SCALE = np.array([2.0, 2.0, 0.25], dtype=np.float32)
+K1_MOTRIXLAB_DOF_POS_SCALE = 1.0
+K1_MOTRIXLAB_DOF_VEL_SCALE = 0.05
+K1_MOTRIXLAB_GYRO_SCALE = 0.25
+K1_MOTRIXLAB_ACTION_SCALE = {
+    "Left_Hip_Pitch": 0.1700,
+    "Right_Hip_Pitch": 0.1700,
+    "Left_Hip_Roll": 0.1900,
+    "Right_Hip_Roll": 0.1900,
+    "Left_Hip_Yaw": 0.09575,
+    "Right_Hip_Yaw": 0.09575,
+    "Left_Knee_Pitch": 0.1867,
+    "Right_Knee_Pitch": 0.1867,
+    "Left_Ankle_Pitch": 0.2394,
+    "Right_Ankle_Pitch": 0.2394,
+    "Left_Ankle_Roll": 0.2394,
+    "Right_Ankle_Roll": 0.2394,
+}
+K1_MOTRIXLAB_TORQUE_LIMIT = {
+    "Left_Hip_Pitch": 68.0,
+    "Right_Hip_Pitch": 68.0,
+    "Left_Hip_Roll": 76.0,
+    "Right_Hip_Roll": 76.0,
+    "Left_Hip_Yaw": 38.3,
+    "Right_Hip_Yaw": 38.3,
+    "Left_Knee_Pitch": 112.0,
+    "Right_Knee_Pitch": 112.0,
+    "Left_Ankle_Pitch": 38.3,
+    "Right_Ankle_Pitch": 38.3,
+    "Left_Ankle_Roll": 38.3,
+    "Right_Ankle_Roll": 38.3,
+}
+K1_MOTRIXLAB_KP = {
+    "Left_Hip_Pitch": 100.0,
+    "Right_Hip_Pitch": 100.0,
+    "Left_Hip_Roll": 100.0,
+    "Right_Hip_Roll": 100.0,
+    "Left_Hip_Yaw": 100.0,
+    "Right_Hip_Yaw": 100.0,
+    "Left_Knee_Pitch": 150.0,
+    "Right_Knee_Pitch": 150.0,
+    "Left_Ankle_Pitch": 40.0,
+    "Right_Ankle_Pitch": 40.0,
+    "Left_Ankle_Roll": 40.0,
+    "Right_Ankle_Roll": 40.0,
+}
+K1_MOTRIXLAB_KD = {
+    "Left_Hip_Pitch": 2.0,
+    "Right_Hip_Pitch": 2.0,
+    "Left_Hip_Roll": 2.0,
+    "Right_Hip_Roll": 2.0,
+    "Left_Hip_Yaw": 2.0,
+    "Right_Hip_Yaw": 2.0,
+    "Left_Knee_Pitch": 4.0,
+    "Right_Knee_Pitch": 4.0,
+    "Left_Ankle_Pitch": 2.0,
+    "Right_Ankle_Pitch": 2.0,
+    "Left_Ankle_Roll": 2.0,
+    "Right_Ankle_Roll": 2.0,
+}
+
 PI_PLUS_RESET_JOINT_POS = {
     "l_hip_pitch_joint": -0.25,
     "l_shoulder_pitch_joint": 0.0,
@@ -398,6 +465,7 @@ class RobotRuntimeConfig:
     use_k1_legged_gym_policy: bool = False
     k1_stand_policy: Path | None = None
     use_k1_amp_onnx: bool = False
+    k1_policy_flavor: str = K1_POLICY_FLAVOR_LEGGED_GYM
 
 
 @dataclass
@@ -423,8 +491,14 @@ class RuntimeArgs:
     max_red_robots: int
     max_blue_robots: int
     use_referee: bool
+    referee_state: str
     policy_device: str
     real_time: bool
+    policy_debug: bool = False
+    policy_debug_interval: int = 50
+    record_video: str | None = None
+    # Blue team policy config.  When identical to red, this is the same object.
+    blue_robot_cfg: RobotRuntimeConfig | None = None
 
 
 def _clamp_team_count(v: int) -> int:
@@ -469,15 +543,27 @@ def infer_k1_pt_policy_io(path: Path) -> tuple[int, int] | None:
     sd = ckpt.get("model_state_dict", ckpt)
     if not isinstance(sd, dict):
         return None
+    # Support "actor.<N>.weight" naming (e.g. legged_gym checkpoints).
     actor_keys = sorted(
         (k for k in sd if re.match(r"^actor\.\d+\.weight$", k)),
         key=lambda s: int(s.split(".")[1]),
     )
-    if not actor_keys:
-        return None
-    w0 = sd[actor_keys[0]]
-    wn = sd[actor_keys[-1]]
-    return (int(w0.shape[1]), int(wn.shape[0]))
+    if actor_keys:
+        w0 = sd[actor_keys[0]]
+        wn = sd[actor_keys[-1]]
+        return (int(w0.shape[1]), int(wn.shape[0]))
+    # Support RSL-RL "actor_state_dict" with "mlp.<N>.weight" naming.
+    actor_sd = ckpt.get("actor_state_dict")
+    if isinstance(actor_sd, dict):
+        mlp_keys = sorted(
+            (k for k in actor_sd if re.match(r"^mlp\.\d+\.weight$", k)),
+            key=lambda s: int(s.split(".")[1]),
+        )
+        if mlp_keys:
+            w0 = actor_sd[mlp_keys[0]]
+            wn = actor_sd[mlp_keys[-1]]
+            return (int(w0.shape[1]), int(wn.shape[0]))
+    return None
 
 
 def infer_k1_onnx_io(path: Path) -> tuple[int, int] | None:
@@ -514,11 +600,15 @@ def build_robot_runtime_config(
     policy_override: Path | None,
     robot_xml_override: Path | None,
     use_k1_legged_gym: bool = True,
+    k1_policy_flavor: str = K1_POLICY_FLAVOR_MOTRIXLAB,
 ) -> RobotRuntimeConfig:
     rt = _normalize_robot_type(robot_type)
     if rt == K1_ROBOT_TYPE:
+        if k1_policy_flavor not in K1_POLICY_FLAVORS:
+            raise ValueError(f"Unsupported K1 policy flavor: {k1_policy_flavor}")
         repo_root = mujoco_dir.parent.parent
         default_pt_policy = mujoco_dir / "assets" / "policies" / "k1_model_46000.pt"
+        default_motrixlab_torch = mujoco_dir / "assets" / "policies" / "k1_walk_model_3600_motrixlab.pt"
         default_legged_onnx_preferred = repo_root / "model_20000_new.onnx"
         default_legged_torch = repo_root / "model_4700.pt"
         default_legged_onnx = repo_root / "legged_gym" / "policy" / "booster_k1" / "model_4700.onnx"
@@ -564,6 +654,8 @@ def build_robot_runtime_config(
         elif want_legged:
             if policy_path is not None:
                 policy_final = policy_path
+            elif default_motrixlab_torch.is_file():
+                policy_final = default_motrixlab_torch
             elif default_legged_onnx_preferred.is_file():
                 policy_final = default_legged_onnx_preferred
                 od = infer_k1_onnx_io(policy_final)
@@ -587,7 +679,7 @@ def build_robot_runtime_config(
                 k1_stand_policy = None
             elif want_legged and not policy_final.is_file():
                 raise FileNotFoundError(f"K1 legged policy not found: {policy_final}")
-            if want_legged and not use_k1_amp_onnx and default_pt_policy.is_file():
+            if want_legged and not use_k1_amp_onnx and k1_policy_flavor != K1_POLICY_FLAVOR_MOTRIXLAB and default_pt_policy.is_file():
                 d_stand = infer_k1_pt_policy_io(default_pt_policy)
                 if d_stand == (K1_FULL_BODY_NUM_OBS, K1_FULL_BODY_NUM_ACT):
                     k1_stand_policy = default_pt_policy
@@ -617,11 +709,12 @@ def build_robot_runtime_config(
             obs_scale=OBS_SCALE,
             cmd_clip=None,
             base_joint_name="world_joint",
-            sim_dt=0.005,
-            control_decimation=4,
+            sim_dt=0.002,
+            control_decimation=10,  # 0.002 * 10 = 0.02 s = 50 Hz, matches training ctrl_dt
             use_k1_legged_gym_policy=want_legged and not use_k1_amp_onnx,
             k1_stand_policy=None if use_k1_amp_onnx else k1_stand_policy,
             use_k1_amp_onnx=use_k1_amp_onnx,
+            k1_policy_flavor=k1_policy_flavor,
         )
     return RobotRuntimeConfig(
         robot_type=PI_PLUS_ROBOT_TYPE,
@@ -652,6 +745,7 @@ def build_robot_runtime_config(
         use_k1_legged_gym_policy=False,
         k1_stand_policy=None,
         use_k1_amp_onnx=False,
+        k1_policy_flavor=K1_POLICY_FLAVOR_LEGGED_GYM,
     )
 
 
@@ -709,10 +803,17 @@ def parse_runtime_args(mujoco_dir: Path) -> RuntimeArgs:
     parser.add_argument("--port", type=int, default=5555, help="ZeroMQ REP port.")
     parser.add_argument("--use-referee", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument(
+        "--referee-state",
+        type=str,
+        choices=["initial", "ready", "set", "playing", "finished"],
+        default="initial",
+        help="Initial referee/GameController state when --use-referee is enabled.",
+    )
+    parser.add_argument(
         "--real-time",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Run simulation in real-time pace. Default false: run as fast as possible.",
+        help="Run simulation in real-time pace. Default true; pass --no-real-time to run as fast as possible.",
     )
     parser.add_argument(
         "--policy-device",
@@ -727,11 +828,60 @@ def parse_runtime_args(mujoco_dir: Path) -> RuntimeArgs:
         default=True,
         help="K1 only (default on): 47-dim obs + 12-dim leg policy for locomotion; "
         "when k1_model_46000.pt is present, standstill uses that full-body policy (78->22) with command hysteresis. "
-        "Default walk policy order: <repo>/model_20000_new.onnx, else model_4700.pt, else legged_gym/.../model_4700.onnx. "
+        "Default walk policy: simulation/motrixsim/assets/policies/k1_walk_model_3600_motrixlab.pt; "
+        "legacy ONNX/TorchScript policies remain available through --policy. "
         "Use --no-k1-legged-gym for legacy k1_model_46000.pt only. "
         "--policy overrides walk policy; .pt files are auto-classified (47->12 legged vs 78->22 full body).",
     )
+    parser.add_argument(
+        "--k1-policy-flavor",
+        choices=K1_POLICY_FLAVORS,
+        default=K1_POLICY_FLAVOR_MOTRIXLAB,
+        help="K1 47->12 policy compatibility mode. Use 'motrixlab' for policies trained by "
+        "MotrixLab/motrix_envs k1-flat-terrain-walk; keep 'legged_gym' for legacy T1/legged_gym models.",
+    )
+    parser.add_argument(
+        "--blue-policy",
+        type=Path,
+        default=None,
+        help="Blue team policy override. When omitted, blue uses the same policy as red (--policy).",
+    )
+    parser.add_argument(
+        "--blue-policy-flavor",
+        choices=K1_POLICY_FLAVORS,
+        default=None,
+        help="K1 policy flavor for blue team. When omitted, blue uses the same flavor as red (--k1-policy-flavor).",
+    )
+    parser.add_argument(
+        "--blue-k1-legged-gym",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Override --k1-legged-gym for blue team only.",
+    )
+    parser.add_argument(
+        "--record-video",
+        type=str,
+        default=None,
+        help="Save top-down frames to DIR at 30 fps (implies --no-webview). "
+        "Recording stays real-time by default so decider closed-loop timing matches WebView. "
+        "Pass --no-real-time explicitly for as-fast-as-possible offline recording. "
+        "Combine with: ffmpeg -framerate 30 -i DIR/frame_%%06d.png -c:v libx264 output.mp4",
+    )
+    parser.add_argument(
+        "--policy-debug",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Print periodic red robot policy diagnostics: command, base height/tilt, obs/action ranges, and timing mode.",
+    )
+    parser.add_argument(
+        "--policy-debug-interval",
+        type=int,
+        default=50,
+        help="Policy control frames between --policy-debug lines.",
+    )
     ns = parser.parse_args()
+    if ns.record_video:
+        ns.webview = False
     team_size = _clamp_team_count(ns.team_size)
     robot_cfg = build_robot_runtime_config(
         mujoco_dir,
@@ -739,7 +889,24 @@ def parse_runtime_args(mujoco_dir: Path) -> RuntimeArgs:
         policy_override=ns.policy,
         robot_xml_override=ns.robot_xml,
         use_k1_legged_gym=ns.k1_legged_gym,
+        k1_policy_flavor=ns.k1_policy_flavor,
     )
+
+    # --- blue team config (defaults to legged_gym model_4700.pt) ---
+    repo_root = mujoco_dir.parent.parent
+    _blue_policy = ns.blue_policy if ns.blue_policy is not None else (repo_root / "model_4700.pt")
+    _blue_flavor = ns.blue_policy_flavor if ns.blue_policy_flavor is not None else K1_POLICY_FLAVOR_LEGGED_GYM
+    _blue_legged = ns.blue_k1_legged_gym if ns.blue_k1_legged_gym is not None else True
+
+    blue_robot_cfg = build_robot_runtime_config(
+        mujoco_dir,
+        robot_type=ns.robot_type,
+        policy_override=_blue_policy,
+        robot_xml_override=ns.robot_xml,
+        use_k1_legged_gym=_blue_legged,
+        k1_policy_flavor=_blue_flavor,
+    )
+
     return RuntimeArgs(
         robot_type=robot_cfg.robot_type,
         robot_cfg=robot_cfg,
@@ -762,8 +929,13 @@ def parse_runtime_args(mujoco_dir: Path) -> RuntimeArgs:
         max_red_robots=team_size,
         max_blue_robots=team_size,
         use_referee=ns.use_referee,
+        referee_state=ns.referee_state,
         policy_device=ns.policy_device,
         real_time=ns.real_time,
+        policy_debug=ns.policy_debug,
+        policy_debug_interval=max(1, int(ns.policy_debug_interval)),
+        record_video=ns.record_video,
+        blue_robot_cfg=blue_robot_cfg,
     )
 
 

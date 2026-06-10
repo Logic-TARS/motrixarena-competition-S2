@@ -13,7 +13,13 @@
 # limitations under the License.
 # ==============================================================================
 
-from . import walk_np  # noqa: F401 register envs
-from .cfg import K1WalkNpEnvCfg  # noqa: F401
+from . import (
+    walk_np,  # noqa: F401 register envs
+)
+from .cfg import (  # noqa: F401
+    K1WalkNpEnvCfg,
+)
 
-__all__ = ["K1WalkNpEnvCfg"]
+__all__ = [
+    "K1WalkNpEnvCfg",
+]

@@ -38,6 +38,9 @@ walk_vel_theta: 1
 max_walk_vel_x: 1.5
 max_walk_vel_y: 2.0
 max_walk_vel_theta: 3.0
+min_walk_vel_x: 0.0
+min_walk_vel_y: 0.0
+min_walk_vel_theta: 0.0
 
 # networking
 server_ip: "192.168.9.105"
@@ -197,3 +200,85 @@ goalkeeper:
   close_to_ball_threshold_x_m: 0.5
   ignore_ball_vel: 5.0
   activate_save: false
+
+# Command filter — velocity smoothing applied after every skill tick
+cmd_filter:
+  vx_max: 0.90
+  vx_min: 0.0
+  vy_max: 0.35
+  w_max: 1.5
+  vx_accel: 0.04
+  vy_accel: 0.02
+  w_accel: 0.08
+  smooth_alpha: 0.3
+
+# Top-level Decider FSM thresholds
+decider_fsm:
+  verbose_log: false
+  dribble_debug_csv: false
+  debug_log_interval_frames: 25
+  ball_seen_confirm_frames: 3
+  ball_lost_confirm_frames: 5
+  approach_to_align_dist: 0.85
+  approach_behind_setup_dist: 0.75
+  approach_waypoint_tolerance: 0.18
+  approach_far_ball_dist: 1.50
+  approach_far_vmax: 0.65
+  approach_near_vmax: 0.35
+  align_to_dribble_ball_x_min: 0.15
+  align_to_dribble_ball_x_max: 0.35
+  align_to_dribble_ball_y_max: 0.08
+  align_to_dribble_facing_error_deg: 12
+  align_to_dribble_lateral_tol: 0.05
+  align_to_dribble_min_behind_depth: 0.22
+  align_turn_only_yaw_deg: 35
+  align_direct_vx_max: 0.45
+  navigation_min_vx: 0.24
+  align_escape_enter_dist: 0.70
+  align_escape_exit_dist: 0.78
+  align_escape_vx: 0.30
+  align_escape_face_enter_deg: 10
+  align_escape_face_exit_deg: 18
+  brake_translation_tolerance: 0.02
+  orbit_path_clearance: 0.28
+  orbit_side_lateral_offset: 0.50
+  orbit_behind_lateral_offset: 0.35
+  orbit_waypoint_tolerance: 0.12
+  orbit_side_deadband: 0.05
+  dribble_to_approach_dist: 0.9
+  sideline_ball_enter_margin: 0.25
+  sideline_ball_exit_margin: 0.55
+  sideline_exit_stable_frames: 5
+  sideline_robot_outside_margin: 0.30
+  sideline_robot_inside_margin: 0.15
+  side_recovery_setup_dist: 0.33
+  side_recovery_forward_weight: 0.60
+  side_recovery_max_linear: 0.35
+  side_recovery_push_vx: 0.30
+  side_recovery_safe_ball_dist: 0.75
+  side_recovery_retreat_step: 0.40
+  side_recovery_bypass_x_offset: 0.50
+  side_recovery_bypass_infield_offset: 0.55
+  side_recovery_cross_outside_offset: 0.12
+  side_recovery_stage_outside_margin: 0.28
+  side_recovery_cross_speed: 0.28
+  side_recovery_stage_tolerance: 0.10
+  side_recovery_face_enter_deg: 10
+  side_recovery_face_exit_deg: 18
+  kick_ball_x_min: 0.12
+  kick_ball_x_max: 0.30
+  kick_ball_y_max: 0.06
+  kick_facing_error_deg: 5
+  kick_max_dist_to_goal: 10.0
+  kick_ball_dist_max: 0.31
+  behind_ball_setup_dist: 0.35
+  behind_ball_lateral_tol: 0.18
+  behind_ball_depth_tol: 0.08
+  kick_behind_ball_lateral_tol: 0.08
+  sim_kick_push_vx: 0.35
+  dribble_fallback_push_vx: 0.30
+  kick_cooldown_sec: 2.0
+  kick_action_duration_sec: 0.35
+  kick_settle_duration_sec: 0.3
+  recover_duration_sec: 0.5
+  search_timeout_sec: 15.0

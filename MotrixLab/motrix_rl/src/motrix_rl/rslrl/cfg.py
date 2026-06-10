@@ -41,6 +41,9 @@ class RslRlActorCfg:
     init_noise_std: float = 1.0
     noise_std_type: Literal["scalar", "log"] = "scalar"
     state_dependent_std: bool = False
+    rnn_type: Literal["lstm", "gru"] = "lstm"
+    rnn_hidden_dim: int = 256
+    rnn_num_layers: int = 1
 
 
 @dataclass
@@ -52,6 +55,9 @@ class RslRlCriticCfg:
     activation: str = "elu"
     obs_normalization: bool = True
     stochastic: bool = False
+    rnn_type: Literal["lstm", "gru"] = "lstm"
+    rnn_hidden_dim: int = 256
+    rnn_num_layers: int = 1
 
 
 @dataclass
@@ -110,7 +116,14 @@ class RslrlRunnerCfg:
         Returns:
             Dictionary representation matching rsl_rl's expected format.
         """
-        return class_to_dict(self)
+        cfg = class_to_dict(self)
+        for model_key in ("actor", "critic"):
+            model_cfg = cfg.get(model_key, {})
+            if model_cfg.get("class_name") != "RNNModel":
+                model_cfg.pop("rnn_type", None)
+                model_cfg.pop("rnn_hidden_dim", None)
+                model_cfg.pop("rnn_num_layers", None)
+        return cfg
 
 
 @dataclass

@@ -48,6 +48,8 @@ mos-sim/
 │   └── labbridge/             # WebView / Bridge / Sim Manager
 ├── MotrixLab/                 # 强化学习训练框架
 ├── legged_gym/                # K1 资源和旧 policy 兼容目录
+├── docs/                      # 启动、训练、比赛和项目整理文档
+├── tools/                     # 一次性维护脚本
 ├── model_20000_new.onnx       # 默认 K1 policy
 └── model_4700.pt              # 默认 K1 TorchScript policy
 ```

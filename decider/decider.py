@@ -6,7 +6,7 @@
 #   @description : The entry py file for decision-making on clients
 #
 
-import sys, os, math, signal, time, traceback
+import sys, os, math, signal, time, traceback, json, logging
 import numpy as np
 from pathlib    import Path
 from datetime   import datetime
@@ -26,9 +26,37 @@ except ImportError:
 import interfaces.action
 import interfaces.vision
 import configuration
+from trajectory import TrajectoryRecorder, default_trajectory_dir
 
 # Import user_entry
 import user_entry
+
+
+def _load_sim_match_config():
+    """Load the simulator match config from the first available backend."""
+    repo_root = Path(__file__).resolve().parent.parent
+    candidates = [
+        repo_root / "simulation" / "motrixsim" / "assets" / "config" / "match_config.json",
+        repo_root / "simulation" / "mujoco" / "assets" / "config" / "match_config.json",
+        repo_root / "simulation" / "isaac_sim" / "config" / "match_config.json",
+    ]
+    for path in candidates:
+        if path.is_file():
+            with path.open("r") as f:
+                return path, json.load(f)
+    raise FileNotFoundError(
+        "No match_config.json found in simulation/motrixsim, simulation/mujoco, or simulation/isaac_sim"
+    )
+
+
+def _active_field_size_from_match_config(match_config):
+    """Extract and validate the playable field dimensions."""
+    field_config = match_config.get("field", {})
+    field_length = float(field_config["length"])
+    field_width = float(field_config["width"])
+    if field_length <= 0.0 or field_width <= 0.0:
+        raise ValueError("field dimensions must be positive")
+    return [field_length, field_width]
 
 
 class Agent(Node):
@@ -82,7 +110,7 @@ class Agent(Node):
         if vel_theta > 0.001:
             vel_theta += self._config.get("min_walk_vel_theta", 0.3)
         elif vel_theta < -0.001:
-            vel_theta -= self._config.get("min_walk_vel_thetea", 0.3)
+            vel_theta -= self._config.get("min_walk_vel_theta", 0.3)
         vel_x = float(np.clip(vel_x, -1.0, 1.0))
         vel_y = float(np.clip(vel_y, -1.0, 1.0))
         vel_theta = float(np.clip(vel_theta, -1.0, 1.0))
@@ -271,8 +299,26 @@ class SimAgent:
         self._config = configuration.load_config()
         self.id = self._config.get("id", 0)
         self.league = self._config.get("league", "S") # Fix: Explicitly set league (Default S)
+        self.color = self._config.get("color", "red")
+        match_config = None
+        try:
+            match_config_path, match_config = _load_sim_match_config()
+            active_field_size = _active_field_size_from_match_config(match_config)
+            self._config["active_field_size"] = active_field_size
+            self.logger.info(
+                f"[SimCore] Active field size {active_field_size[0]:.2f}x"
+                f"{active_field_size[1]:.2f}m "
+                f"from {match_config_path}"
+            )
+        except Exception as e:
+            self.logger.warning(
+                f"[SimCore] Failed to load active field size from match config: {e}. "
+                "Falling back to league field_size."
+            )
         # Simulation control frequency (Hz). <= 0 means unlimited lockstep speed.
         self.sim_hz = self._config.get("sim_hz", 50.0) if sim_hz is None else sim_hz
+        self.sim_fixed_cmd = None
+        self.trajectory_dir = None
         
         # Override with command line arg if provided
         if args:
@@ -281,38 +327,34 @@ class SimAgent:
                 self._config["id"] = self.id # [FIX] Also update config so Vision module sees correct Local ID
             
             # Determine color: priority CLI > Config
-            self.color = self._config.get("color", "red")
             if hasattr(args, "color") and args.color is not None:
                  self.color = args.color
 
             if hasattr(args, "sim_hz") and args.sim_hz is not None:
                 self.sim_hz = args.sim_hz
+            if hasattr(args, "sim_fixed_cmd") and args.sim_fixed_cmd:
+                parts = [p.strip() for p in str(args.sim_fixed_cmd).split(",")]
+                if len(parts) != 3:
+                    raise ValueError("--sim-fixed-cmd must be formatted as vx,vy,w")
+                self.sim_fixed_cmd = [float(p) for p in parts]
+                self.sim_fixed_cmd = [float(np.clip(v, -1.0, 1.0)) for v in self.sim_fixed_cmd]
+            trajectory_enabled = bool(
+                getattr(args, "record_trajectory", False)
+                or getattr(args, "trajectory_dir", None)
+            )
+            if trajectory_enabled:
+                requested_dir = getattr(args, "trajectory_dir", None)
+                self.trajectory_dir = (
+                    Path(requested_dir).expanduser().resolve()
+                    if requested_dir
+                    else default_trajectory_dir()
+                )
 
             # Configure team offset based on resolved color
             if self.color:
-                import json
                 try:
-                    # Resolve config path relative to this file.
-                    # Priority: Mujoco backend config -> legacy simulation config.
-                    cfg_candidates = [
-                        os.path.abspath(
-                            os.path.join(os.path.dirname(__file__), "../simulation/mujoco/assets/config/match_config.json")
-                        ),
-                        os.path.abspath(
-                            os.path.join(os.path.dirname(__file__), "../simulation/isaac_sim/config/match_config.json")
-                        ),
-                    ]
-                    cfg_path = None
-                    for c in cfg_candidates:
-                        if os.path.exists(c):
-                            cfg_path = c
-                            break
-                    if cfg_path is None:
-                        raise FileNotFoundError("No match_config.json found in simulation/mujoco or simulation/isaac_sim")
-
-                    with open(cfg_path, 'r') as f:
-                        match_config = json.load(f)
-                    
+                    if match_config is None:
+                        _, match_config = _load_sim_match_config()
                     red_count = match_config.get("teams", {}).get("red", {}).get("count", 1)
                     
                     if self.color == "blue":
@@ -334,6 +376,8 @@ class SimAgent:
             self.logger.info(f"[SimCore] Control frequency limited to {self.sim_hz:.2f} Hz")
         else:
             self.logger.info("[SimCore] Control frequency unlimited (lockstep max speed)")
+        if self.sim_fixed_cmd is not None:
+            self.logger.info(f"[SimCore] Fixed sim command enabled: {self.sim_fixed_cmd}")
 
         self.logger.info(f"[SimCore] Final Robot ID: {self.id}")
         
@@ -354,9 +398,25 @@ class SimAgent:
         
         self.logger.info("[SimCore] Core initialized. Calling user's init()")
         user_entry.init(self)
+        self._active_field_length, self._active_field_width = (
+            user_entry.resolve_field_size(self._config)
+        )
         
         # State
         self.current_cmd = [0.0, 0.0, 0.0]
+        self._running = True
+        self._trajectory_recorder = None
+        self._trajectory_frame = 0
+        self._trajectory_started_perf = time.perf_counter()
+        self._trajectory_last_perf = None
+        if self.trajectory_dir is not None:
+            self._trajectory_recorder = TrajectoryRecorder(
+                self.trajectory_dir,
+                flush_interval=20,
+            )
+            self.logger.info(
+                f"[Trajectory] Recording to {self._trajectory_recorder.csv_path}"
+            )
 
     def get_logger(self):
         return self.logger
@@ -374,15 +434,20 @@ class SimAgent:
     def run(self):
         self.logger.info("[SimCore] Starting Loop...")
         tick_period = (1.0 / self.sim_hz) if self.sim_hz > 0 else None
-        while True:
-            try:
+        try:
+            while self._running:
                 loop_start = time.perf_counter()
-                # 1. User Loop (Think)
-                user_entry.loop(self)
-                
+                # 1. User Loop (Think), or fixed command for locomotion debugging.
+                if self.sim_fixed_cmd is None:
+                    user_entry.loop(self)
+                else:
+                    self.current_cmd = list(self.sim_fixed_cmd)
+
+                sent_cmd = list(self.current_cmd)
+
                 # 2. Sync with Sim (Action -> State)
                 # Send current_cmd, receive new state
-                state = self.client.communicate(self.current_cmd, robot_id=self.id)
+                state = self.client.communicate(sent_cmd, robot_id=self.id)
                 
                 if state:
                     # 3. Update Perception
@@ -392,21 +457,109 @@ class SimAgent:
                     # Actual ZMQ protocol structure: {"state": {"robots": {...}, "ball": {...}, "gamecontroller": {...}}, ...}
                     self.gamecontroller.update(sim_state.get("gamecontroller", {}))
                     self.communication.update(sim_state.get("communication", {}))
+                    try:
+                        self._record_trajectory(state, sent_cmd)
+                    except Exception as e:
+                        self.logger.warning(
+                            f"[Trajectory] Recording disabled after write failure: {e}"
+                        )
+                        try:
+                            self._trajectory_recorder.close()
+                        except Exception:
+                            pass
+                        self._trajectory_recorder = None
                 
                 if tick_period is not None:
                     elapsed = time.perf_counter() - loop_start
                     sleep_time = tick_period - elapsed
                     if sleep_time > 0:
                         time.sleep(sleep_time)
-                
-            except KeyboardInterrupt:
-                break
-            except Exception as e:
-                self.logger.error(f"[SimCore] Error in loop: {e}")
-                traceback.print_exc()
-                break
-        
-        self.stop()
+        except KeyboardInterrupt:
+            self.request_stop()
+        except Exception as e:
+            self.logger.error(f"[SimCore] Error in loop: {e}")
+            traceback.print_exc()
+        finally:
+            self.stop()
+            self._finish_trajectory()
+            try:
+                self.client.close()
+            except Exception:
+                pass
+
+    def request_stop(self, *_args):
+        self._running = False
+
+    def _record_trajectory(self, response, sent_cmd):
+        recorder = self._trajectory_recorder
+        if recorder is None:
+            return
+
+        now_perf = time.perf_counter()
+        dt_s = (
+            None
+            if self._trajectory_last_perf is None
+            else now_perf - self._trajectory_last_perf
+        )
+        self._trajectory_last_perf = now_perf
+        sim_state = response.get("state", {})
+        ball_state = sim_state.get("ball", {})
+        robot_pos = self.get_self_pos()
+        ball_pos = self.get_ball_pos_in_map()
+        ball_local = self.get_ball_pos()
+        fsm = getattr(self, "_decider_fsm", None)
+        snapshot = fsm.get_snapshot() if fsm is not None else {}
+        row = {
+            "frame": self._trajectory_frame,
+            "wall_time": time.time(),
+            "elapsed_s": now_perf - self._trajectory_started_perf,
+            "sim_time": response.get("sim_timestamp"),
+            "dt_s": dt_s,
+            "run_mode": "fixed_command" if self.sim_fixed_cmd is not None else "fsm",
+            "team": self.color,
+            "robot_id": self._config.get("id", 0),
+            "field_length": self._active_field_length,
+            "field_width": self._active_field_width,
+            "robot_x": robot_pos[0] if robot_pos is not None else None,
+            "robot_y": robot_pos[1] if robot_pos is not None else None,
+            "robot_yaw_deg": self.get_self_yaw(),
+            "ball_x": ball_pos[0] if ball_pos is not None else None,
+            "ball_y": ball_pos[1] if ball_pos is not None else None,
+            "ball_z": ball_state.get("z"),
+            "ball_local_x": ball_local[0] if ball_local is not None else None,
+            "ball_local_y": ball_local[1] if ball_local is not None else None,
+            "ball_distance": self.get_ball_distance(),
+            "cmd_vx": sent_cmd[0],
+            "cmd_vy": sent_cmd[1],
+            "cmd_w": sent_cmd[2],
+            "game_state": self.gamecontroller.game_state,
+        }
+        row.update(snapshot)
+        recorder.write(row)
+        self._trajectory_frame += 1
+
+    def _finish_trajectory(self):
+        recorder = self._trajectory_recorder
+        if recorder is None:
+            return
+        recorder.close()
+        self.logger.info(f"[Trajectory] CSV saved to {recorder.csv_path}")
+        try:
+            decider_dir = str(Path(__file__).resolve().parent)
+            if decider_dir not in sys.path:
+                sys.path.insert(0, decider_dir)
+            from scripts.analyze_trajectory import analyze_trajectory
+
+            analyze_trajectory(recorder.csv_path, recorder.output_dir)
+            self.logger.info(
+                f"[Trajectory] Analysis saved to {recorder.output_dir}"
+            )
+        except Exception as e:
+            self.logger.warning(
+                f"[Trajectory] CSV is safe, but analysis generation failed: {e}"
+            )
+        finally:
+            self._trajectory_recorder = None
 
     # --- Action Interface ---
     def cmd_vel(self, vel_x: float, vel_y: float, vel_theta: float) -> None:
@@ -415,6 +568,19 @@ class SimAgent:
         vel_x *= self._config.get("max_walk_vel_x", 0.25)
         vel_y *= self._config.get("max_walk_vel_y", 0.1)
         vel_theta *= self._config.get("max_walk_vel_theta", 0.5)
+        # Apply min_walk_vel deadband (matching Agent.cmd_vel)
+        if vel_x > 0.001:
+            vel_x += self._config.get("min_walk_vel_x", 0.2)
+        elif vel_x < -0.001:
+            vel_x -= self._config.get("min_walk_vel_x", 0.2)
+        if vel_y > 0.001:
+            vel_y += self._config.get("min_walk_vel_y", 0.2)
+        elif vel_y < -0.001:
+            vel_y -= self._config.get("min_walk_vel_y", 0.2)
+        if vel_theta > 0.001:
+            vel_theta += self._config.get("min_walk_vel_theta", 0.3)
+        elif vel_theta < -0.001:
+            vel_theta -= self._config.get("min_walk_vel_theta", 0.3)
         vel_x = float(np.clip(vel_x, -1.0, 1.0))
         vel_y = float(np.clip(vel_y, -1.0, 1.0))
         vel_theta = float(np.clip(vel_theta, -1.0, 1.0))
@@ -519,6 +685,21 @@ if __name__ == "__main__":
     parser.add_argument("--id", type=int, default=None, help="Robot ID (overrides config)")
     parser.add_argument("--color", type=str, default=None, choices=["red", "blue"], help="Team color (red/blue). If set, --id is interpreted as player number within team.")
     parser.add_argument("--sim-hz", dest="sim_hz", type=float, default=None, help="Simulation control frequency in Hz (<=0 for unlimited)")
+    parser.add_argument(
+        "--sim-fixed-cmd",
+        default=None,
+        help="Debug only: send fixed normalized final command vx,vy,w to the simulator, bypassing user_entry logic.",
+    )
+    parser.add_argument(
+        "--record-trajectory",
+        action="store_true",
+        help="Record robot, ball, command, and FSM diagnostics in simulation mode.",
+    )
+    parser.add_argument(
+        "--trajectory-dir",
+        default=None,
+        help="Trajectory output directory. Supplying it also enables recording.",
+    )
     
     # We need to handle known vs unknown args because ROS args might be present if users mistake
     # But since we control the call:
@@ -528,6 +709,8 @@ if __name__ == "__main__":
         # Simulation Mode (ROS-free)
         import logging
         agent = SimAgent(args, ip=args.ip, port=args.port, sim_hz=args.sim_hz)
+        signal.signal(signal.SIGINT, agent.request_stop)
+        signal.signal(signal.SIGTERM, agent.request_stop)
         agent.run()
     else:
         # ROS Mode - check if ROS2 is available

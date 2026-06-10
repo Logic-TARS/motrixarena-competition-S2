@@ -13,6 +13,10 @@
 # limitations under the License.
 # ==============================================================================
 
+from _source_path import ensure_source_path
+
+ensure_source_path()
+
 import gymnasium as gym
 import numpy as np
 from absl import app, flags

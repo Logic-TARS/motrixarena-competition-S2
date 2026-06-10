@@ -5,11 +5,13 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import socket
 import sys
 import tempfile
 import time
+from datetime import datetime
 import types
 from copy import deepcopy
 from dataclasses import dataclass
@@ -37,6 +39,7 @@ from .runtime_config import (
     K1_AMP_NUM_OBS,
     K1_AMP_NUM_SINGLE_OBS,
     K1_AMP_ACTION_SCALE,
+    K1_AMP_UPPER_BODY_JOINTS,
     K1_FULL_BODY_NUM_ACT,
     K1_FULL_BODY_NUM_OBS,
     K1_LEGGED_GYM_ACTION_SCALE,
@@ -54,6 +57,15 @@ from .runtime_config import (
     CMD_VEL_NORM_MIN,
     K1_LEGGED_GYM_NUM_OBS,
     K1_LEGGED_GYM_TORQUE_LIMIT,
+    K1_MOTRIXLAB_ACTION_SCALE,
+    K1_MOTRIXLAB_CMD_SCALE,
+    K1_MOTRIXLAB_DOF_POS_SCALE,
+    K1_MOTRIXLAB_DOF_VEL_SCALE,
+    K1_MOTRIXLAB_GYRO_SCALE,
+    K1_MOTRIXLAB_KD,
+    K1_MOTRIXLAB_KP,
+    K1_MOTRIXLAB_TORQUE_LIMIT,
+    K1_POLICY_FLAVOR_MOTRIXLAB,
     K1_ROBOT_TYPE,
     MAX_ROBOTS_PER_TEAM,
     PI_PLUS_KD_POLICY_ORDER,
@@ -387,9 +399,6 @@ FIELD_PRESETS = {
 
 DRAG_RESET_PROTECT_SEC = 0.5
 DRAG_CMD_ZERO_POLICY_FRAMES = 5
-FALL_RESET_PROTECT_SEC = 1.5
-FALL_UPRIGHT_DOT_MIN = 0.2
-FALL_CONFIRM_FRAMES = 10
 
 # Extra root height when instantiating robots in the merged scene (meters).
 # Helps avoid initial penetrations with non-planar or thick floor collision (e.g. mesh stadium).
@@ -1351,6 +1360,18 @@ class MLPActor(nn.Module):
         return self.actor(x)
 
 
+class NormalizedActor(nn.Module):
+    def __init__(self, actor: nn.Module, mean: torch.Tensor, std: torch.Tensor, eps: float = 1.0e-2):
+        super().__init__()
+        self.actor = actor
+        self.eps = float(eps)
+        self.register_buffer("obs_mean", mean.detach().clone().reshape(1, -1).float())
+        self.register_buffer("obs_std", std.detach().clone().reshape(1, -1).float())
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.actor((x - self.obs_mean) / (self.obs_std + self.eps))
+
+
 def _quat_to_rot_world_from_body(quat_xyzw: np.ndarray) -> np.ndarray:
     x, y, z, w = quat_xyzw
     return np.array(
@@ -1403,10 +1424,11 @@ PI_PLUS_DEFAULT_DOF_POS_MUJOCO = np.asarray(
 )
 
 # K1 walk/stand hybrid: body-frame command (vx, vy, yaw rate) gates legged vs full-body policy.
-K1_HYBRID_WALK_ENTER_LIN = 0.07
-K1_HYBRID_WALK_EXIT_LIN = 0.035
-K1_HYBRID_WALK_ENTER_YAW = 0.18
-K1_HYBRID_WALK_EXIT_YAW = 0.07
+# Lowered from (0.07,0.035,0.18,0.07) to reduce stand-policy latency at low speeds.
+K1_HYBRID_WALK_ENTER_LIN = 0.04
+K1_HYBRID_WALK_EXIT_LIN = 0.02
+K1_HYBRID_WALK_ENTER_YAW = 0.10
+K1_HYBRID_WALK_EXIT_YAW = 0.04
 
 
 @dataclass
@@ -1455,12 +1477,15 @@ class RobotSpec:
     k1_amp_hist: np.ndarray | None = None
     k1_amp_last_mjcf: np.ndarray | None = None
     k1_amp_gather_mjcf: np.ndarray | None = None
+    k1_amp_upper_mjcf: np.ndarray | None = None
 
 
 class MultiRobotMotrixSim:
     def __init__(self, args: RuntimeArgs):
         self.args = args
         self.robot_cfg: RobotRuntimeConfig = args.robot_cfg
+        self._blue_cfg: RobotRuntimeConfig | None = args.blue_robot_cfg
+        self._has_blue_policy = self._blue_cfg is not None
         self.max_red_robots = args.max_red_robots
         self.max_blue_robots = args.max_blue_robots
         self.active_robot_ids = self._active_ids_from_limits(self.max_red_robots, self.max_blue_robots)
@@ -1504,9 +1529,14 @@ class MultiRobotMotrixSim:
         )
 
         self.model = mtx.load_model(str(scene_xml))
+        # Override MJCF timestep to match the MotrixLab training environment
+        # (MotrixLab sets model.options.timestep = cfg.sim_dt = 0.002 in env.py).
+        # Without this, the policy runs at 250 Hz instead of the trained 50 Hz,
+        # and the gait phase clock drifts to ~24 % of the expected rate.
+        # NOTE: This override affects ALL robots sharing this SceneModel,
+        # including Pi+ if co-simulated.
+        self.model.options.timestep = 0.002
         self.data = mtx.SceneData(self.model, batch=[1])
-        # Keep physics coefficients aligned with MuJoCo source scene (world.xml),
-        # including timestep/options loaded in the model.
         self.sim_dt = float(self.model.options.timestep)
         self.control_decimation = int(self.robot_cfg.control_decimation)
 
@@ -1550,12 +1580,27 @@ class MultiRobotMotrixSim:
         self._onnx_input_name = ""
         self._onnx_output_name = ""
         self.policy: nn.Module | None = None
+        self._policy_uses_obs_normalizer = False
+        self._policy_format = "unloaded"
         self._policy_obs_dim = 0
         self._policy_action_dim = 0
         self._init_policy(args.policy)
         self._k1_stand_policy: nn.Module | None = None
         if self.robot_cfg.k1_stand_policy is not None and not self.robot_cfg.use_k1_amp_onnx:
             self._init_k1_stand_policy(self.robot_cfg.k1_stand_policy)
+
+        # Blue team policy (when different from red)
+        self._blue_ts_policy: torch.jit.ScriptModule | None = None
+        self._blue_policy: nn.Module | None = None
+        self._blue_onnx_session = None
+        self._blue_policy_is_onnx = False
+        self._blue_policy_is_torchscript = False
+        self._blue_policy_uses_obs_normalizer = False
+        self._blue_policy_format = "unloaded"
+        self._blue_policy_obs_dim = 0
+        self._blue_policy_action_dim = 0
+        if self._has_blue_policy:
+            self._init_blue_policy(self._blue_cfg.policy)
 
         self.robot_specs: dict[int, RobotSpec] = self._build_robot_specs()
         self._apply_team_body_colors()
@@ -1587,8 +1632,9 @@ class MultiRobotMotrixSim:
             self.command_received[rid] = True
         self.last_msg_info = {"timestamp": 0.0, "id": -1, "source": "unknown"}
         self._policy_step_count = 0
-        self._policy_print_step = 0
-        self._printed_target_policy_io = False
+        self._policy_debug = bool(getattr(args, "policy_debug", False))
+        self._policy_debug_interval = max(1, int(getattr(args, "policy_debug_interval", 50)))
+        self._effective_real_time = bool(args.real_time)
 
         self._startup_qpos = np.asarray(self.data.dof_pos, dtype=np.float64).reshape(-1).copy()
         self._startup_qvel = np.asarray(self.data.dof_vel, dtype=np.float64).reshape(-1).copy()
@@ -1598,8 +1644,6 @@ class MultiRobotMotrixSim:
         self._robot_protect_until: dict[int, float] = {}
         self._robot_protect_pose: dict[int, tuple[float, float, float]] = {}
         self._robot_cmd_zero_frames_left: dict[int, int] = {}
-        self._fall_candidate_frames: dict[int, int] = {}
-        self._enable_fall_recovery = True
         self._ball_last_touch_rid: int | None = None
 
         self.use_referee = bool(args.use_referee)
@@ -1622,7 +1666,8 @@ class MultiRobotMotrixSim:
                 left_team_name=str(team_meta_cfg["red"]["team_name"]),
                 right_team_name=str(team_meta_cfg["blue"]["team_name"]),
             )
-            print("[MultiRobotMotrixSim] referee: enabled")
+            self._apply_initial_referee_state(str(getattr(args, "referee_state", "initial")))
+            print(f"[MultiRobotMotrixSim] referee: enabled state={self.referee.game_state_dict().get('state_name')}")
         else:
             print("[MultiRobotMotrixSim] referee: disabled")
 
@@ -1678,6 +1723,7 @@ class MultiRobotMotrixSim:
             self._policy_obs_dim = K1_AMP_NUM_OBS
             self._policy_action_dim = K1_AMP_NUM_ACT
             self._policy_is_onnx = True
+            self._policy_format = "onnx"
             print(
                 f"[MultiRobotMotrixSim] K1 AMP ONNX (stacked {K1_AMP_FRAME_STACK}x{K1_AMP_NUM_SINGLE_OBS}): {path} "
                 f"(obs_dim={self._policy_obs_dim}, act_dim={self._policy_action_dim})"
@@ -1707,6 +1753,7 @@ class MultiRobotMotrixSim:
                 self._policy_obs_dim = K1_LEGGED_GYM_NUM_OBS
                 self._policy_action_dim = K1_LEGGED_GYM_NUM_ACT
                 self._policy_is_onnx = True
+                self._policy_format = "onnx"
                 print(
                     f"[MultiRobotMotrixSim] K1 legged_gym ONNX: {path} (obs_dim={self._policy_obs_dim}, act_dim={self._policy_action_dim})"
                 )
@@ -1730,12 +1777,15 @@ class MultiRobotMotrixSim:
                     self._ts_policy = ts
                     self._policy_is_torchscript = True
                     self._policy_is_onnx = False
+                    self._policy_uses_obs_normalizer = "obs_normalizer" in str(ts)
+                    self._policy_format = "torchscript"
                     self.policy = None
                     self._policy_obs_dim = K1_LEGGED_GYM_NUM_OBS
                     self._policy_action_dim = K1_LEGGED_GYM_NUM_ACT
                     print(
                         f"[MultiRobotMotrixSim] K1 legged_gym TorchScript: {path} "
-                        f"(obs_dim={self._policy_obs_dim}, act_dim={self._policy_action_dim})"
+                        f"(obs_dim={self._policy_obs_dim}, act_dim={self._policy_action_dim}, "
+                        f"flavor={self.robot_cfg.k1_policy_flavor})"
                     )
                     return
 
@@ -1747,24 +1797,107 @@ class MultiRobotMotrixSim:
                     )
                 self._policy_is_onnx = False
                 self._policy_is_torchscript = False
+                self._policy_format = "checkpoint"
+                self._check_exported_torchscript_parity(path)
                 print(
                     f"[MultiRobotMotrixSim] K1 legged_gym Torch actor: {path} "
-                    f"(obs_dim={self._policy_obs_dim}, act_dim={self._policy_action_dim})"
+                    f"(obs_dim={self._policy_obs_dim}, act_dim={self._policy_action_dim}, "
+                    f"flavor={self.robot_cfg.k1_policy_flavor}, normalizer={self._policy_uses_obs_normalizer})"
                 )
                 return
 
             raise RuntimeError(f"K1 legged_gym policy must be .onnx or .pt, got {path}")
 
         self.policy = self._load_torch_policy(path)
+        self._policy_format = "checkpoint"
 
-    def _load_mlp_actor_from_checkpoint(self, policy_path: Path) -> tuple[nn.Module, int, int]:
+    def _init_blue_policy(self, policy_path: Path) -> None:
+        """Load blue team policy. Mirrors _init_policy using self._blue_cfg."""
+        path = Path(policy_path)
+        if self._blue_cfg.use_k1_amp_onnx:
+            raise RuntimeError("Blue team AMP ONNX policy not supported yet")
+        if self._blue_cfg.use_k1_legged_gym_policy:
+            suf = path.suffix.lower()
+            if suf == ".pt":
+                ts = torch.jit.load(str(path), map_location=self.policy_device)
+                ts.eval()
+                with torch.inference_mode():
+                    probe = ts(torch.zeros(1, K1_LEGGED_GYM_NUM_OBS, device=self.policy_device))
+                if int(probe.shape[-1]) != K1_LEGGED_GYM_NUM_ACT:
+                    raise RuntimeError(f"Blue legged TorchScript expected act_dim={K1_LEGGED_GYM_NUM_ACT}, got {probe.shape}")
+                self._blue_ts_policy = ts
+                self._blue_policy_is_torchscript = True
+                self._blue_policy_uses_obs_normalizer = "obs_normalizer" in str(ts)
+                self._blue_policy_format = "torchscript"
+                self._blue_policy_obs_dim = K1_LEGGED_GYM_NUM_OBS
+                self._blue_policy_action_dim = K1_LEGGED_GYM_NUM_ACT
+                print(f"[MultiRobotMotrixSim] Blue K1 legged_gym TorchScript: {path} "
+                      f"(obs_dim={self._blue_policy_obs_dim}, act_dim={self._blue_policy_action_dim}, "
+                      f"flavor={self._blue_cfg.k1_policy_flavor})")
+                return
+            raise RuntimeError(f"Blue legged_gym policy must be .pt, got {path}")
+        # MotrixLab flavor: load as nn.Module (use internal loader to avoid overwriting red dims)
+        policy, in_d, out_d, uses_norm = self._load_mlp_actor_from_checkpoint(path)
+        self._blue_policy = policy
+        self._blue_policy_uses_obs_normalizer = uses_norm
+        self._blue_policy_format = "checkpoint"
+        self._blue_policy_obs_dim = in_d
+        self._blue_policy_action_dim = out_d
+        print(f"[MultiRobotMotrixSim] Blue K1 MotrixLab actor: {path} "
+              f"(obs_dim={in_d}, act_dim={out_d}, flavor={self._blue_cfg.k1_policy_flavor}, normalizer={uses_norm})")
+
+    def _infer_blue_policy_actions(self, obs_batch: np.ndarray) -> np.ndarray:
+        """Run inference with blue team policy."""
+        if self._blue_policy_is_onnx:
+            raise RuntimeError("Blue ONNX policy inference not implemented")
+        if self._blue_policy_is_torchscript:
+            if self._blue_ts_policy is None:
+                raise RuntimeError("Blue TorchScript policy not loaded")
+            with torch.inference_mode():
+                obs_tensor = torch.from_numpy(obs_batch.astype(np.float32, copy=False)).to(self.policy_device)
+                return self._blue_ts_policy(obs_tensor).detach().cpu().numpy().astype(np.float32, copy=False)
+        if self._blue_policy is None:
+            raise RuntimeError("Blue torch policy not loaded")
+        with torch.inference_mode():
+            obs_tensor = torch.from_numpy(obs_batch).to(self.policy_device)
+            return self._blue_policy(obs_tensor).detach().cpu().numpy().astype(np.float32, copy=False)
+
+    def _load_mlp_actor_from_checkpoint(self, policy_path: Path) -> tuple[nn.Module, int, int, bool]:
         ckpt = _load_checkpoint_compat(policy_path, map_location=self.policy_device)
         state_dict = ckpt["model_state_dict"] if isinstance(ckpt, dict) and "model_state_dict" in ckpt else ckpt
         if not isinstance(state_dict, dict):
             raise RuntimeError(f"Unsupported policy checkpoint format: {type(state_dict)}")
         actor_state = {k: v for k, v in state_dict.items() if k.startswith("actor.")}
+        obs_mean = None
+        obs_std = None
+        # Support RSL-RL format: ckpt["actor_state_dict"] with "mlp.<N>.<param>" naming.
+        if not actor_state and isinstance(ckpt, dict) and "actor_state_dict" in ckpt:
+            raw_as = ckpt["actor_state_dict"]
+            actor_state = {}
+            for k, v in raw_as.items():
+                if k == "obs_normalizer._mean":
+                    obs_mean = v
+                    continue
+                if k == "obs_normalizer._std":
+                    obs_std = v
+                    continue
+                # Remap mlp.X.xxx -> actor.X.xxx; skip std and non-runtime normalizer params.
+                m = re.match(r"^mlp\.(\d+\..+)$", k)
+                if m:
+                    actor_state[f"actor.{m.group(1)}"] = v
+        elif actor_state:
+            for k, v in state_dict.items():
+                if k in ("actor.obs_normalizer._mean", "actor_obs_normalizer._mean"):
+                    obs_mean = v
+                elif k in ("actor.obs_normalizer._std", "actor_obs_normalizer._std"):
+                    obs_std = v
         if not actor_state:
             raise RuntimeError("Checkpoint does not contain actor.* weights")
+        actor_state = {
+            k: v for k, v in actor_state.items() if re.match(r"^actor\.\d+\.(weight|bias)$", k)
+        }
+        if not actor_state:
+            raise RuntimeError("Checkpoint does not contain loadable actor MLP weights")
 
         actor_layer_dims: list[int] = []
         actor_weight_keys = sorted(
@@ -1782,20 +1915,89 @@ class MultiRobotMotrixSim:
         out_dim = int(actor_layer_dims[-1])
         policy = MLPActor(layer_dims=actor_layer_dims).to(self.policy_device)
         policy.load_state_dict(actor_state, strict=True)
+        uses_norm = False
+        if obs_mean is not None and obs_std is not None:
+            mean = torch.as_tensor(obs_mean, dtype=torch.float32, device=self.policy_device).reshape(-1)
+            std = torch.as_tensor(obs_std, dtype=torch.float32, device=self.policy_device).reshape(-1)
+            if int(mean.numel()) == in_dim and int(std.numel()) == in_dim:
+                policy = NormalizedActor(policy, mean=mean, std=std).to(self.policy_device)
+                uses_norm = True
+            else:
+                print(
+                    "[MultiRobotMotrixSim] checkpoint obs_normalizer skipped: "
+                    f"mean/std shapes {tuple(mean.shape)}/{tuple(std.shape)} do not match obs_dim={in_dim}"
+                )
         policy.eval()
-        return policy, in_dim, out_dim
+        return policy, in_dim, out_dim, uses_norm
 
     def _load_torch_policy(self, policy_path: Path) -> nn.Module:
-        policy, in_d, out_d = self._load_mlp_actor_from_checkpoint(policy_path)
+        policy, in_d, out_d, uses_norm = self._load_mlp_actor_from_checkpoint(policy_path)
         self._policy_obs_dim = in_d
         self._policy_action_dim = out_d
+        self._policy_uses_obs_normalizer = uses_norm
         return policy
+
+    def _find_exported_torchscript_for_checkpoint(self, checkpoint_path: Path) -> Path | None:
+        stem = checkpoint_path.stem
+        repo_root = Path(__file__).resolve().parents[3]
+        candidates = [
+            checkpoint_path.with_name(f"{stem}_torchscript.pt"),
+            repo_root / "MotrixLab" / "exported" / f"{stem}_torchscript.pt",
+            repo_root / "exported" / f"{stem}_torchscript.pt",
+        ]
+        for cand in candidates:
+            if cand.is_file():
+                return cand
+        return None
+
+    def _check_exported_torchscript_parity(self, checkpoint_path: Path) -> None:
+        if self.policy is None or self._policy_obs_dim <= 0 or self._policy_action_dim <= 0:
+            return
+        ts_path = self._find_exported_torchscript_for_checkpoint(checkpoint_path)
+        if ts_path is None:
+            return
+        try:
+            ts = torch.jit.load(str(ts_path), map_location=self.policy_device)
+            ts.eval()
+            samples = torch.stack(
+                [
+                    torch.zeros(self._policy_obs_dim, dtype=torch.float32, device=self.policy_device),
+                    torch.linspace(-0.25, 0.25, self._policy_obs_dim, dtype=torch.float32, device=self.policy_device),
+                ],
+                dim=0,
+            )
+            with torch.inference_mode():
+                raw_act = self.policy(samples)
+                ts_act = ts(samples)
+            if int(ts_act.shape[-1]) != self._policy_action_dim:
+                print(
+                    "[MultiRobotMotrixSim] policy parity skipped: "
+                    f"{ts_path} output dim {tuple(ts_act.shape)} does not match checkpoint act_dim={self._policy_action_dim}"
+                )
+                return
+            max_abs = float(torch.max(torch.abs(raw_act - ts_act)).detach().cpu())
+            if max_abs > 5.0e-4:
+                print(
+                    "[MultiRobotMotrixSim] WARNING policy parity mismatch: "
+                    f"checkpoint={checkpoint_path.name}, exported={ts_path.name}, max_abs={max_abs:.6g}. "
+                    "Check obs normalization/export compatibility."
+                )
+            else:
+                print(
+                    "[MultiRobotMotrixSim] policy parity ok: "
+                    f"checkpoint={checkpoint_path.name}, exported={ts_path.name}, max_abs={max_abs:.3g}"
+                )
+        except Exception as e:
+            print(
+                "[MultiRobotMotrixSim] policy parity check failed: "
+                f"{type(e).__name__}: {e}"
+            )
 
     def _init_k1_stand_policy(self, policy_path: Path) -> None:
         path = Path(policy_path)
         if not path.is_file():
             raise FileNotFoundError(f"K1 stand policy not found: {path}")
-        policy, in_d, out_d = self._load_mlp_actor_from_checkpoint(path)
+        policy, in_d, out_d, _ = self._load_mlp_actor_from_checkpoint(path)
         if in_d != K1_FULL_BODY_NUM_OBS or out_d != K1_FULL_BODY_NUM_ACT:
             raise RuntimeError(
                 f"K1 stand policy expects obs dim {K1_FULL_BODY_NUM_OBS} and act dim {K1_FULL_BODY_NUM_ACT}, "
@@ -1912,6 +2114,8 @@ class MultiRobotMotrixSim:
         for rid in self.active_robot_ids:
             name = FIXED_ROBOT_ID_TO_NAME[rid]
             team = "red" if rid < MAX_ROBOTS_PER_TEAM else "blue"
+            is_blue = bool(rid >= MAX_ROBOTS_PER_TEAM and self._has_blue_policy)
+            cfg = self._blue_cfg if is_blue else self.robot_cfg
             pref_joints = [f"{name}__{j}" for j in joint_names]
             qpos_idx = []
             qvel_idx = []
@@ -2010,7 +2214,7 @@ class MultiRobotMotrixSim:
             k1_legged_joint_indices = None
             k1_non_leg_mask = None
             k1_gait_phase = None
-            if self.robot_cfg.use_k1_legged_gym_policy:
+            if cfg.use_k1_legged_gym_policy:
                 leg_idx_list = [joint_names.index(jn) for jn in K1_LEGGED_GYM_LEG_JOINTS_POLICY_ORDER]
                 k1_legged_joint_indices = np.asarray(leg_idx_list, dtype=np.int32)
                 k1_non_leg_mask = np.ones((len(joint_names),), dtype=bool)
@@ -2024,12 +2228,18 @@ class MultiRobotMotrixSim:
                 k1_gait_phase = 0.0
                 for i, jn in enumerate(K1_LEGGED_GYM_LEG_JOINTS_POLICY_ORDER):
                     li = int(leg_idx_list[i])
-                    kp[li] = float(K1_LEGGED_GYM_KP[jn])
-                    kd[li] = float(K1_LEGGED_GYM_KD[jn])
-                    effort[li] = float(K1_LEGGED_GYM_TORQUE_LIMIT)
+                    if cfg.k1_policy_flavor == K1_POLICY_FLAVOR_MOTRIXLAB:
+                        kp[li] = float(K1_MOTRIXLAB_KP[jn])
+                        kd[li] = float(K1_MOTRIXLAB_KD[jn])
+                        effort[li] = float(K1_MOTRIXLAB_TORQUE_LIMIT[jn])
+                    else:
+                        kp[li] = float(K1_LEGGED_GYM_KP[jn])
+                        kd[li] = float(K1_LEGGED_GYM_KD[jn])
+                        effort[li] = float(K1_LEGGED_GYM_TORQUE_LIMIT)
             k1_amp_hist = None
             k1_amp_last_mjcf = None
             k1_amp_gather_mjcf = None
+            k1_amp_upper_mjcf = None
             if self.robot_cfg.use_k1_amp_onnx:
                 k1_amp_gather_mjcf = np.asarray(
                     [joint_names.index(n) for n in K1_AMP_ACTUATOR_JOINT_ORDER],
@@ -2037,6 +2247,10 @@ class MultiRobotMotrixSim:
                 )
                 k1_amp_hist = np.zeros((K1_AMP_FRAME_STACK, K1_AMP_NUM_SINGLE_OBS), dtype=np.float32)
                 k1_amp_last_mjcf = np.zeros((K1_AMP_NUM_ACT,), dtype=np.float32)
+                k1_amp_upper_mjcf = np.asarray(
+                    [i for i, name in enumerate(K1_AMP_ACTUATOR_JOINT_ORDER) if name in K1_AMP_UPPER_BODY_JOINTS],
+                    dtype=np.int32,
+                )
             specs[rid] = RobotSpec(
                 rid=rid,
                 name=name,
@@ -2079,6 +2293,7 @@ class MultiRobotMotrixSim:
                 k1_amp_hist=k1_amp_hist,
                 k1_amp_last_mjcf=k1_amp_last_mjcf,
                 k1_amp_gather_mjcf=k1_amp_gather_mjcf,
+                k1_amp_upper_mjcf=k1_amp_upper_mjcf,
             )
         return specs
 
@@ -2124,8 +2339,10 @@ class MultiRobotMotrixSim:
         """
         return np.clip(np.asarray(cmd, dtype=np.float32).reshape(3), CMD_VEL_NORM_MIN, CMD_VEL_NORM_MAX)
 
-    def _obs_k1_legged_gym(self, spec: RobotSpec, cmd_override: np.ndarray | None = None) -> np.ndarray:
+    def _obs_k1_legged_gym(self, spec: RobotSpec, cmd_override: np.ndarray | None = None,
+                           policy_flavor: str | None = None) -> np.ndarray:
         """Observation matching legged_gym/envs/T1/T1.py compute_obs (47-dim K1 locomotion)."""
+        flavor = policy_flavor or self.robot_cfg.k1_policy_flavor
         if (
             spec.k1_legged_default_dof is None
             or spec.k1_legged_joint_indices is None
@@ -2173,6 +2390,20 @@ class MultiRobotMotrixSim:
         diff = (dof_pos_leg - spec.k1_legged_default_dof) * float(K1_LEGGED_GYM_DOF_POS_SCALE)
         dvel = dof_vel_leg * float(K1_LEGGED_GYM_DOF_VEL_SCALE)
         last_a = spec.k1_legged_last_action.astype(np.float32)
+
+        if flavor == K1_POLICY_FLAVOR_MOTRIXLAB:
+            obs = np.zeros((K1_LEGGED_GYM_NUM_OBS,), dtype=np.float32)
+            obs[0:3] = gyro.astype(np.float32) * float(K1_MOTRIXLAB_GYRO_SCALE)
+            obs[3:6] = gravity
+            obs[6:9] = self._k1_legged_cmd_obs_from_norm_cmd(cmd_src) * K1_MOTRIXLAB_CMD_SCALE
+            obs[9:21] = (dof_pos_leg - spec.k1_legged_default_dof) * float(K1_MOTRIXLAB_DOF_POS_SCALE)
+            obs[21:33] = dof_vel_leg * float(K1_MOTRIXLAB_DOF_VEL_SCALE)
+            obs[33:45] = last_a
+            obs[45] = s_g
+            obs[46] = c_g
+            obs = np.nan_to_num(obs, nan=0.0, posinf=0.0, neginf=0.0)
+            c = float(self.robot_cfg.obs_clip)
+            return np.clip(obs, -c, c)
 
         obs = np.zeros((K1_LEGGED_GYM_NUM_OBS,), dtype=np.float32)
         obs[0:3] = gravity
@@ -2268,7 +2499,22 @@ class MultiRobotMotrixSim:
         gravity = (rot_wb.T @ np.array([0.0, 0.0, -1.0], dtype=np.float32)) * obs_scale["gravity_orientation"]
         cmd_src = self.command_buffer[spec.rid] if cmd_override is None else cmd_override
 
-        cmd = cmd_src * obs_scale["cmd"]
+        # Apply command deadzone matching training Commands.command_deadzone = 0.2:
+        # when the linear-velocity norm is below threshold, zero it out so the
+        # policy sees a clean "stand still" command as it was trained on.
+        cmd_src = np.asarray(cmd_src, dtype=np.float32).reshape(3).copy()
+        if float(np.linalg.norm(cmd_src[:2])) <= 0.2:
+            cmd_src[0] = 0.0
+            cmd_src[1] = 0.0
+
+        # Scale commands to match the training observation range.
+        # MotrixLab training uses K1_MOTRIXLAB_CMD_SCALE = [2.0, 2.0, 0.25]
+        # (lin_vel * 2.0, ang_vel * 0.25).  Other flavors use a flat scalar.
+        _flavor = self._blue_cfg.k1_policy_flavor if (spec.rid >= MAX_ROBOTS_PER_TEAM and self._has_blue_policy) else self.robot_cfg.k1_policy_flavor
+        if _flavor == K1_POLICY_FLAVOR_MOTRIXLAB:
+            cmd = cmd_src * K1_MOTRIXLAB_CMD_SCALE
+        else:
+            cmd = cmd_src * obs_scale["cmd"]
 
         if (
             self.robot_cfg.robot_type == PI_PLUS_ROBOT_TYPE
@@ -2362,41 +2608,62 @@ class MultiRobotMotrixSim:
             infer_specs.append(spec)
             infer_cmd_override.append(cmd_ov)
 
-        walk_obs: list[np.ndarray] = []
+        # Split observations by team for per-team policy inference
+        walk_obs_red: list[np.ndarray] = []
+        walk_obs_blue: list[np.ndarray] = []
         stand_obs: list[np.ndarray] = []
         debug_obs_list: list[np.ndarray] = []
+        walk_team_is_blue: list[bool] = []  # parallel to combined walk_obs for action dispatch
 
         if len(infer_specs) != len(infer_cmd_override):
             raise RuntimeError("internal: infer_specs / infer_cmd_override length mismatch")
         for spec, cmd_ov in zip(infer_specs, infer_cmd_override):
+            is_blue = bool(spec.rid >= MAX_ROBOTS_PER_TEAM and self._has_blue_policy)
+            use_legged = self._blue_cfg.use_k1_legged_gym_policy if is_blue else self.robot_cfg.use_k1_legged_gym_policy
+            flavor = self._blue_cfg.k1_policy_flavor if is_blue else self.robot_cfg.k1_policy_flavor
             cmd_gate = default_cmd if cmd_ov is not None else self.command_buffer[spec.rid]
-            if hybrid:
+            if hybrid and not is_blue:  # hybrid only supported for red team
                 self._k1_update_hybrid_walk_state(
                     spec, np.clip(np.asarray(cmd_gate, dtype=np.float32), CMD_VEL_NORM_MIN, CMD_VEL_NORM_MAX)
                 )
                 if spec.k1_hybrid_walking:
-                    o = self._obs_k1_legged_gym(spec, cmd_override=cmd_ov)
-                    walk_obs.append(o)
+                    o = self._obs_k1_legged_gym(spec, cmd_override=cmd_ov, policy_flavor=flavor)
+                    walk_obs_red.append(o); walk_team_is_blue.append(False)
                 else:
                     o = self._obs_k1_fullbody_for_hybrid(spec, cmd_override=cmd_ov)
                     stand_obs.append(o)
             elif self.robot_cfg.use_k1_amp_onnx:
                 o = self._obs_k1_amp(spec, cmd_override=cmd_ov)
-                walk_obs.append(o)
-            elif self.robot_cfg.use_k1_legged_gym_policy:
-                o = self._obs_k1_legged_gym(spec, cmd_override=cmd_ov)
-                walk_obs.append(o)
+                walk_obs_red.append(o); walk_team_is_blue.append(False)
             else:
-                o = self._obs_for_robot(spec, cmd_override=cmd_ov)
-                walk_obs.append(o)
+                if use_legged:
+                    o = self._obs_k1_legged_gym(spec, cmd_override=cmd_ov, policy_flavor=flavor)
+                else:
+                    o = self._obs_for_robot(spec, cmd_override=cmd_ov)
+                if is_blue:
+                    walk_obs_blue.append(o); walk_team_is_blue.append(True)
+                else:
+                    walk_obs_red.append(o); walk_team_is_blue.append(False)
             debug_obs_list.append(o)
 
-        act_walk_batch: np.ndarray | None = None
-        if walk_obs:
-            obs_batch_w = np.stack(walk_obs, axis=0).astype(np.float32, copy=False)
-            act_walk_batch = self._infer_policy_actions(obs_batch_w)
-            if act_walk_batch.ndim == 1:
-                act_walk_batch = act_walk_batch.reshape(1, -1)
+        # --- red team policy inference ---
+        act_walk_red: np.ndarray | None = None
+        if walk_obs_red:
+            obs_batch_r = np.stack(walk_obs_red, axis=0).astype(np.float32, copy=False)
+            act_walk_red = self._infer_policy_actions(obs_batch_r)
+            if act_walk_red.ndim == 1:
+                act_walk_red = act_walk_red.reshape(1, -1)
+
+        # --- blue team policy inference ---
+        act_walk_blue: np.ndarray | None = None
+        if walk_obs_blue:
+            obs_batch_b = np.stack(walk_obs_blue, axis=0).astype(np.float32, copy=False)
+            if self._has_blue_policy:
+                act_walk_blue = self._infer_blue_policy_actions(obs_batch_b)
+            else:
+                act_walk_blue = self._infer_policy_actions(obs_batch_b)
+            if act_walk_blue.ndim == 1:
+                act_walk_blue = act_walk_blue.reshape(1, -1)
 
         act_stand_batch: np.ndarray | None = None
         if stand_obs:
@@ -2405,7 +2672,8 @@ class MultiRobotMotrixSim:
             if act_stand_batch.ndim == 1:
                 act_stand_batch = act_stand_batch.reshape(1, -1)
 
-        wi = 0
+        wi_red = 0
+        wi_blue = 0
         si = 0
         if infer_specs:
             for i, spec in enumerate(infer_specs):
@@ -2416,15 +2684,24 @@ class MultiRobotMotrixSim:
                     act = np.nan_to_num(act_stand_batch[si], nan=0.0, posinf=0.0, neginf=0.0)
                     si += 1
                 else:
-                    if act_walk_batch is None:
-                        raise RuntimeError("K1 walk policy produced no actions")
-                    act = np.nan_to_num(act_walk_batch[wi], nan=0.0, posinf=0.0, neginf=0.0)
-                    wi += 1
+                    team_blue = walk_team_is_blue[wi_red + wi_blue] if (wi_red + wi_blue) < len(walk_team_is_blue) else False
+                    if team_blue:
+                        if act_walk_blue is None:
+                            raise RuntimeError("Blue walk policy produced no actions")
+                        act = np.nan_to_num(act_walk_blue[wi_blue], nan=0.0, posinf=0.0, neginf=0.0)
+                        wi_blue += 1
+                    else:
+                        if act_walk_red is None:
+                            raise RuntimeError("Red walk policy produced no actions")
+                        act = np.nan_to_num(act_walk_red[wi_red], nan=0.0, posinf=0.0, neginf=0.0)
+                        wi_red += 1
                 if spec.rid == debug_rid:
                     debug_obs = debug_obs_list[i].copy()
                     debug_act = act.copy()
                 if self.robot_cfg.use_k1_amp_onnx:
-                    act_mjcf = act.astype(np.float32, copy=False).reshape(K1_AMP_NUM_ACT)
+                    act_mjcf = act.astype(np.float32, copy=False).reshape(K1_AMP_NUM_ACT).copy()
+                    if spec.k1_amp_upper_mjcf is not None and spec.k1_amp_upper_mjcf.size > 0:
+                        act_mjcf[spec.k1_amp_upper_mjcf] = 0.0
                     if spec.k1_amp_last_mjcf is not None:
                         spec.k1_amp_last_mjcf[:] = act_mjcf
                     pol_to_mjcf = np.asarray(
@@ -2483,9 +2760,14 @@ class MultiRobotMotrixSim:
                         jidx = int(spec.k1_legged_joint_indices[kk])
                         spec.last_action[jidx] = act[kk]
                     spec.target_joint_pos[:] = spec.init_angles
-                    asc = float(K1_LEGGED_GYM_ACTION_SCALE)
                     for kk in range(K1_LEGGED_GYM_NUM_ACT):
                         jidx = int(spec.k1_legged_joint_indices[kk])
+                        jn = K1_LEGGED_GYM_LEG_JOINTS_POLICY_ORDER[kk]
+                        _flavor = self._blue_cfg.k1_policy_flavor if (spec.rid >= MAX_ROBOTS_PER_TEAM and self._has_blue_policy) else self.robot_cfg.k1_policy_flavor
+                        if _flavor == K1_POLICY_FLAVOR_MOTRIXLAB:
+                            asc = float(K1_MOTRIXLAB_ACTION_SCALE[jn])
+                        else:
+                            asc = float(K1_LEGGED_GYM_ACTION_SCALE)
                         spec.target_joint_pos[jidx] = float(spec.k1_legged_default_dof[kk] + act[kk] * asc)
                     if spec.joint_lower is not None and spec.joint_upper is not None:
                         np.clip(spec.target_joint_pos, spec.joint_lower, spec.joint_upper, out=spec.target_joint_pos)
@@ -2531,18 +2813,40 @@ class MultiRobotMotrixSim:
                         np.clip(spec.filtered_dof_target, spec.joint_lower, spec.joint_upper, out=spec.filtered_dof_target)
                     spec.target_joint_pos[:] = spec.filtered_dof_target
 
-        if (
-            not self._printed_target_policy_io
-            and self._policy_step_count == self._policy_print_step
-            and debug_rid is not None
-            and debug_obs is not None
-            and debug_act is not None
-        ):
-            debug_name = FIXED_ROBOT_ID_TO_NAME.get(debug_rid, f"id{debug_rid}")
-            np.set_printoptions(precision=6, suppress=True)
-            print(f"[Policy Frame {self._policy_step_count}] robot={debug_name} input(obs): {debug_obs}")
-            print(f"[Policy Frame {self._policy_step_count}] robot={debug_name} output(action): {debug_act}")
-            self._printed_target_policy_io = True
+        self._maybe_print_policy_debug(debug_rid, debug_obs, debug_act)
+
+    def _maybe_print_policy_debug(
+        self,
+        debug_rid: int | None,
+        debug_obs: np.ndarray | None,
+        debug_act: np.ndarray | None,
+    ) -> None:
+        if not self._policy_debug or debug_rid is None or debug_obs is None or debug_act is None:
+            return
+        if self._policy_step_count != 1 and self._policy_step_count % self._policy_debug_interval != 0:
+            return
+        spec = self.robot_specs.get(debug_rid)
+        if spec is None:
+            return
+        qpos = np.asarray(self.data.dof_pos[0], dtype=np.float32)
+        quat = qpos[spec.base_qpos_adr + 3 : spec.base_qpos_adr + 7]
+        rot_wb = _quat_to_rot_world_from_body(quat)
+        gravity = rot_wb.T @ np.array([0.0, 0.0, -1.0], dtype=np.float32)
+        tilt_xy = float(np.linalg.norm(gravity[:2]))
+        base_z = float(qpos[spec.base_qpos_adr + 2])
+        cmd = self.command_buffer.get(debug_rid, np.array(DEFAULT_CMD, dtype=np.float32))
+        obs = np.asarray(debug_obs, dtype=np.float32).reshape(-1)
+        act = np.asarray(debug_act, dtype=np.float32).reshape(-1)
+        name = FIXED_ROBOT_ID_TO_NAME.get(debug_rid, f"id{debug_rid}")
+        print(
+            "[PolicyDebug] "
+            f"step={self._policy_step_count} robot={name} real_time={bool(self._effective_real_time)} "
+            f"format={self._policy_format} normalizer={self._policy_uses_obs_normalizer} "
+            f"cmd={np.array2string(np.asarray(cmd), precision=3, suppress_small=True)} "
+            f"base_z={base_z:.3f} tilt_xy={tilt_xy:.3f} "
+            f"obs[min={float(obs.min()):.3f}, max={float(obs.max()):.3f}, rms={float(np.sqrt(np.mean(obs * obs))):.3f}] "
+            f"act[min={float(act.min()):.3f}, max={float(act.max()):.3f}, rms={float(np.sqrt(np.mean(act * act))):.3f}]"
+        )
 
     def _set_actuator_ctrls(self, act_idx: np.ndarray, values: np.ndarray | float) -> None:
         """
@@ -2559,6 +2863,10 @@ class MultiRobotMotrixSim:
         for k in range(n):
             ai = int(idx[k])
             ctrl = float(val[k])
+            try:
+                self.data.actuator_ctrls[0, ai] = ctrl
+            except Exception:
+                pass
             applied = False
             try:
                 actuator = self.model.get_actuator(ai)
@@ -2630,22 +2938,27 @@ class MultiRobotMotrixSim:
             # Keep process alive and preserve current state/teleport commands.
             # Full reset here makes interactive controls appear ineffective.
             return counter + 1
-        if self.robot_cfg.use_k1_legged_gym_policy:
-            dt_g = float(self.sim_dt) * float(K1_LEGGED_GYM_GAIT_FREQUENCY)
-            for sp in self.robot_specs.values():
-                if sp.k1_gait_phase is None:
-                    continue
-                if self._k1_stand_policy is not None and not sp.k1_hybrid_walking:
-                    continue
-                sp.k1_gait_phase = float(np.fmod(sp.k1_gait_phase + dt_g, 1.0))
+        # Per-robot gait phase update with flavour-correct frequency:
+        #   MotrixLab training uses phase_period = 0.8 s  →  1.25 Hz
+        #   legged_gym / T1 training uses gait_frequency = 1.5 Hz
+        _MOTRIXLAB_GAIT_FREQ = 1.0 / 0.8  # 1.25 Hz
+        for sp in self.robot_specs.values():
+            if sp.k1_gait_phase is None:
+                continue
+            if self._k1_stand_policy is not None and not sp.k1_hybrid_walking:
+                continue
+            _is_blue = bool(sp.rid >= MAX_ROBOTS_PER_TEAM and self._has_blue_policy)
+            _cfg = self._blue_cfg if _is_blue else self.robot_cfg
+            if not _cfg.use_k1_legged_gym_policy:
+                continue
+            _gf = _MOTRIXLAB_GAIT_FREQ if _cfg.k1_policy_flavor == K1_POLICY_FLAVOR_MOTRIXLAB else K1_LEGGED_GYM_GAIT_FREQUENCY
+            dt_g = float(self.sim_dt) * float(_gf)
+            sp.k1_gait_phase = float(np.fmod(sp.k1_gait_phase + dt_g, 1.0))
         if self._enforce_joint_state_limits():
             self.model.forward_kinematic(self.data)
         self._update_referee(self.sim_dt)
         post_hold_changed = self._apply_robot_protection_holds()
         if post_hold_changed:
-            self.model.forward_kinematic(self.data)
-        fall_recovered = self._recover_fallen_robots() if self._enable_fall_recovery else False
-        if fall_recovered:
             self.model.forward_kinematic(self.data)
         if (
             not np.isfinite(self.data.dof_pos).all()
@@ -2738,45 +3051,6 @@ class MultiRobotMotrixSim:
         if not active:
             return None
         return min(active)
-
-    def _recover_fallen_robots(self) -> bool:
-        changed = False
-        now = time.monotonic()
-        for rid, spec in self.robot_specs.items():
-            if self._is_robot_protected(rid):
-                self._fall_candidate_frames[rid] = 0
-                continue
-            base_z = float(self.data.dof_pos[0, spec.base_qpos_adr + 2])
-            startup_z = float(self._startup_qpos[spec.base_qpos_adr + 2])
-            # Only trigger auto-recovery when the robot is both tilted and clearly low.
-            # This avoids repeated false recoveries for walking/leaning states.
-            low_z_gate = max(0.45, startup_z - 0.25)
-            if not np.isfinite(base_z) or base_z > low_z_gate:
-                self._fall_candidate_frames[rid] = 0
-                continue
-            quat = self.data.dof_pos[0][spec.base_qpos_adr + 3 : spec.base_qpos_adr + 7]
-            rot_wb = _quat_to_rot_world_from_body(quat)
-            upright_dot = float(rot_wb[2, 2])
-            if not np.isfinite(upright_dot) or upright_dot >= FALL_UPRIGHT_DOT_MIN:
-                self._fall_candidate_frames[rid] = 0
-                continue
-            fallen_frames = int(self._fall_candidate_frames.get(rid, 0)) + 1
-            self._fall_candidate_frames[rid] = fallen_frames
-            if fallen_frames < FALL_CONFIRM_FRAMES:
-                continue
-            self._fall_candidate_frames[rid] = 0
-            x = float(self.data.dof_pos[0][spec.base_qpos_adr + 0])
-            y = float(self.data.dof_pos[0][spec.base_qpos_adr + 1])
-            theta = float(self._yaw_from_quat(quat))
-            self._robot_protect_pose[rid] = (x, y, theta)
-            self._robot_protect_until[rid] = now + FALL_RESET_PROTECT_SEC
-            self._robot_cmd_zero_frames_left[rid] = max(
-                int(self._robot_cmd_zero_frames_left.get(rid, 0)),
-                DRAG_CMD_ZERO_POLICY_FRAMES,
-            )
-            self._hold_robot_at_reset_pose(spec, x, y, theta)
-            changed = True
-        return changed
 
     def _update_referee(self, dt: float):
         if self.referee is None:
@@ -2958,13 +3232,11 @@ class MultiRobotMotrixSim:
         self._robot_protect_until.clear()
         self._robot_protect_pose.clear()
         self._robot_cmd_zero_frames_left.clear()
-        self._fall_candidate_frames.clear()
         self._ball_last_touch_rid = None
         if reset_referee and self.referee is not None:
             self.referee.reset()
         self.last_msg_info = {"timestamp": 0.0, "id": -1, "source": "unknown"}
         self._policy_step_count = 0
-        self._printed_target_policy_io = False
         self.model.forward_kinematic(self.data)
 
     def set_spawn_points(self, spawn_points: dict[str, list[float]]):
@@ -3148,6 +3420,28 @@ class MultiRobotMotrixSim:
         img[max(0, ya) : min(h, yb + 1), max(0, xa) : min(w, xa + 2)] = 230
         img[max(0, ya) : min(h, yb + 1), max(0, xb - 1) : min(w, xb + 1)] = 230
 
+        # Draw goals at both ends of the field.
+        goal_half_w = 0.5 * float(getattr(self, "_goal_width", 1.9))
+        goal_depth = 1.0  # metres
+        _white = np.array([230, 230, 230], dtype=np.uint8)
+        for goal_x_sign in (-1, 1):
+            gx0, gy0 = to_px(goal_x_sign * half_l, goal_half_w)
+            gx1, gy1 = to_px(goal_x_sign * (half_l + goal_depth), -goal_half_w)
+            gxa, gxb = sorted((gx0, gx1))
+            gya, gyb = sorted((gy0, gy1))
+            # goal net area (slightly darker than lines)
+            gy_inner_a = gya + 2
+            gy_inner_b = gyb - 2
+            gx_inner_a = gxa + 2
+            gx_inner_b = gxb - 2
+            if gy_inner_a < gy_inner_b and gx_inner_a < gx_inner_b:
+                img[max(0, gy_inner_a):min(h, gy_inner_b + 1),
+                    max(0, gx_inner_a):min(w, gx_inner_b + 1)] = np.array([180, 180, 180], dtype=np.uint8)
+            # goal frame (top / bottom / back edges)
+            img[max(0, gya):min(h, gya + 2), max(0, gxa):min(w, gxb + 1)] = _white
+            img[max(0, gyb - 1):min(h, gyb + 1), max(0, gxa):min(w, gxb + 1)] = _white
+            img[max(0, gya):min(h, gyb + 1), max(0, gxb - 1):min(w, gxb + 1)] = _white
+
         states = self.state_for_web()
         ball = states.get("ball", {})
         bx, by = to_px(float(ball.get("x", 0.0)), float(ball.get("y", 0.0)))
@@ -3316,6 +3610,20 @@ class MultiRobotMotrixSim:
             print(f"[MotrixWebView] apply_web_commands: {', '.join(cmd_summary)}")
         return counter, reset_triggered
 
+    def _apply_initial_referee_state(self, state: str):
+        if self.referee is None:
+            return
+        state = state.lower().strip()
+        if state == "initial":
+            return
+        if state == "finished":
+            self._apply_referee_command("finish")
+            return
+        if state == "playing":
+            self._apply_referee_command("play")
+            return
+        self._apply_referee_command(state)
+
     def _apply_referee_command(self, cmd: str):
         if self.referee is None:
             return
@@ -3335,14 +3643,27 @@ class MultiRobotMotrixSim:
         elif cmd == "stoptimer":
             self.referee.set_auto_state_enabled(False)
 
-    def zmq_loop(self, port: int, webview: MujocoLabWebView | None, web_fps: int, width: int, height: int):
+    def zmq_loop(self, port: int, webview: MujocoLabWebView | None, web_fps: int, width: int, height: int,
+                 record_video_dir: str | None = None):
         context = zmq.Context()
         socket = context.socket(zmq.REP)
         socket.bind(f"tcp://*:{port}")
         print(f"[MotrixZMQ] Bound to tcp://*:{port}")
         use_real_time = bool(self.args.real_time or (webview is not None))
+        self._effective_real_time = use_real_time
+        print(
+            f"[MotrixTiming] real_time={use_real_time} "
+            f"(arg_real_time={bool(self.args.real_time)}, webview={webview is not None}, record_video={record_video_dir is not None})"
+        )
         if webview is not None and not self.args.real_time:
             print("[MotrixWebView] forcing real-time stepping for web responsiveness")
+
+        record_counter = 0
+        record_interval = 1.0 / 30.0  # 30 fps recording
+        next_record_time = time.time()
+        if record_video_dir is not None:
+            os.makedirs(record_video_dir, exist_ok=True)
+            print(f"[MotrixRecord] Saving frames to {record_video_dir} at 30 fps")
 
         renderer = None
         frame_interval = 1.0 / max(1, web_fps)
@@ -3363,7 +3684,7 @@ class MultiRobotMotrixSim:
                     cmds = webview.poll_commands()
                     counter, reset_triggered = self._apply_web_commands(cmds, counter)
 
-                flags = zmq.NOBLOCK if webview is not None else 0
+                flags = zmq.NOBLOCK  # always non-blocking so sim steps at physics rate
                 got_msg = False
                 msg = None
                 try:
@@ -3407,7 +3728,7 @@ class MultiRobotMotrixSim:
                         "ack_timestamp": client_ts,
                     }
                     socket.send_json(response)
-                elif webview is not None and not reset_triggered:
+                elif not reset_triggered:
                     counter = self._step_once(counter)
 
                 if webview is not None:
@@ -3421,6 +3742,37 @@ class MultiRobotMotrixSim:
                     if now >= next_state_emit_time:
                         webview.emit_robot_states(self.state_for_web())
                         next_state_emit_time = now + state_emit_interval
+
+                if record_video_dir is not None:
+                    now = time.time()
+                    if now >= next_record_time:
+                        try:
+                            from PIL import Image, ImageDraw, ImageFont
+                        except ImportError:
+                            print("[MotrixRecord] pillow not installed. Run: pip install pillow")
+                            record_video_dir = None
+                        else:
+                            try:
+                                frame = self._render_topdown_web_frame(width, height)
+                                img = Image.fromarray(frame)
+                                draw = ImageDraw.Draw(img)
+                                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                try:
+                                    font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 18)
+                                except Exception:
+                                    font = ImageFont.load_default()
+                                bbox = draw.textbbox((0, 0), ts, font=font)
+                                tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+                                pad = 6
+                                draw.rectangle([(0, 0), (tw + pad * 2, th + pad * 2)], fill=(0, 0, 0, 180))
+                                draw.text((pad, pad), ts, fill=(255, 255, 255), font=font)
+                                fpath = os.path.join(record_video_dir, f"frame_{record_counter:06d}.png")
+                                img.save(fpath)
+                                record_counter += 1
+                                next_record_time = now + record_interval
+                            except Exception as e:
+                                print(f"[MotrixRecord] frame save error: {e}")
+                                record_video_dir = None
 
                 if use_real_time:
                     wait_time = float(self.model.options.timestep) - (time.time() - step_start)
@@ -3493,6 +3845,7 @@ def run_sim(args: RuntimeArgs, template_dir: Path):
             web_fps=args.web_fps,
             width=args.web_width,
             height=args.web_height,
+            record_video_dir=args.record_video,
         )
     finally:
         if webview is not None:

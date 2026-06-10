@@ -12,7 +12,7 @@ class FindBallStateMachine:
         self._config = self.agent.get_config()
         self.read_params()  # 读取配置参数
 
-        self.last_rotaion = 1
+        self.last_rotation = 1
         
         self.rotate_start_time = 0  # 记录旋转开始时间
         
@@ -128,7 +128,8 @@ class FindBallStateMachine:
     def start_rotation_and_forwarding(self, event=None):
         """开始旋转身体寻找球"""
         self.logger.debug("[FIND BALL FSM] Starting rotation...")
-        ball_angle_from_other_robots = self.agent.get_ball_angle_from_other_robots()
+        get_shared_ball_angle = getattr(self.agent, "get_ball_angle_from_other_robots", None)
+        ball_angle_from_other_robots = get_shared_ball_angle() if callable(get_shared_ball_angle) else None
         
         ball_history = self.agent.get_ball_history()
         if len(ball_history) >= 2 and ball_history[-1] and ball_history[-2] and time.time() - ball_history[-1]['timestamp'] < 5:
@@ -146,10 +147,10 @@ class FindBallStateMachine:
                 )
                 return
             elif abs(target_angle_rad) > math.pi * 0.8:
-                rotate_vel = self.last_rotaion * self.rotation_vel_theta
+                rotate_vel = self.last_rotation * self.rotation_vel_theta
             else:
                 rotate_vel = np.sign(target_angle_rad) * self.rotation_vel_theta
-                self.last_rotaion = np.sign(target_angle_rad)
+                self.last_rotation = np.sign(target_angle_rad)
         else:
             self.logger.debug("[FIND BALL FSM] No other robots see the ball, rotating randomly...")
             rotate_vel = self.rotation_vel_theta  # 可配置为随机方向或固定方向
@@ -160,7 +161,9 @@ class FindBallStateMachine:
     def stop_rotation(self, event=None):
         """停止旋转"""
         self.logger.debug("[FIND BALL FSM] Stopping rotation...")
-        self.agent.stop(0.5)
+        # [FIX] Replaced agent.stop(0.5) with non-blocking cmd_vel to avoid
+        # stalling the 50 Hz main control loop.
+        self.agent.cmd_vel(0.0, 0.0, 0.0)
         self.rotate_start_time = time.time()  # 重置旋转开始时间
         self.logger.debug("[FIND BALL FSM] Rotation stopped")
 

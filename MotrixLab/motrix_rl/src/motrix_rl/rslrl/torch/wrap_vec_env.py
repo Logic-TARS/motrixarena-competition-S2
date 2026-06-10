@@ -98,14 +98,13 @@ class RslrlNpEnvWrap(VecEnv):
         self.episode_length_buf[dones_np] = 0
 
         # Convert to torch tensors
-        obs_tensor = torch.from_numpy(state.obs).to(self._device)
         rewards = torch.from_numpy(state.reward).to(self._device)
 
         # Merge terminated and truncated into dones
         dones = torch.from_numpy(state.done.astype(np.float32)).to(self._device)
 
         # Create TensorDict for observations
-        obs = TensorDict({"policy": obs_tensor}, batch_size=[self._num_envs], device=self._device)
+        obs = self._make_obs_tensordict(state)
 
         # Build extras dict (RSLRL calls it "extras" not "infos")
         extras = {}
@@ -128,10 +127,8 @@ class RslrlNpEnvWrap(VecEnv):
         # Reset episode length buffer
         self.episode_length_buf.zero_()
 
-        obs_tensor = torch.from_numpy(state.obs).to(self._device)
-
         # Create TensorDict for observations
-        obs = TensorDict({"policy": obs_tensor}, batch_size=[self._num_envs], device=self._device)
+        obs = self._make_obs_tensordict(state)
 
         # Build extras dict
         extras = {}
@@ -148,9 +145,23 @@ class RslrlNpEnvWrap(VecEnv):
             obs, _ = self.reset()
             return obs
 
-        obs_tensor = torch.from_numpy(self._state.obs).to(self._device)
-        obs = TensorDict({"policy": obs_tensor}, batch_size=[self._num_envs], device=self._device)
-        return obs
+        return self._make_obs_tensordict(self._state)
+
+    def _make_obs_tensordict(self, state) -> TensorDict:
+        obs_items = {"policy": torch.from_numpy(state.obs).to(self._device)}
+        privileged_obs = self._get_privileged_obs(state)
+        if privileged_obs is not None:
+            obs_items["privileged"] = torch.from_numpy(privileged_obs).to(self._device)
+        return TensorDict(obs_items, batch_size=[self._num_envs], device=self._device)
+
+    def _get_privileged_obs(self, state) -> np.ndarray | None:
+        if hasattr(self._env, "get_privileged_obs"):
+            privileged_obs = self._env.get_privileged_obs(state.data, state.info)
+            return privileged_obs.astype(np.float32)
+        privileged_obs = state.info.get("privileged_obs")
+        if isinstance(privileged_obs, np.ndarray):
+            return privileged_obs.astype(np.float32)
+        return None
 
     def render(self) -> None:
         """Render the environment.

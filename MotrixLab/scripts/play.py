@@ -16,8 +16,11 @@
 import logging
 from pathlib import Path
 
+from _source_path import ensure_source_path
+
+ensure_source_path()
+
 from absl import app, flags
-from skrl import config
 
 from motrix_rl import utils
 
@@ -36,6 +39,9 @@ _RAND_SEED = flags.DEFINE_bool("rand-seed", False, "Generate random seed")
 _RLLIB = flags.DEFINE_string(
     "rllib", None, "The RL framework (skrl/rslrl). Auto-discovered from latest training if not specified."
 )
+_LOG_STATE = flags.DEFINE_bool("log-state", False, "Print robot state during play")
+_LOG_STATE_EVERY = flags.DEFINE_integer("log-state-every", 30, "Print robot state every N control steps")
+_LOG_STATE_ENVS = flags.DEFINE_integer("log-state-envs", 4, "Number of parallel envs to print when logging state")
 
 
 def get_inference_backend(policy_path: Path | str, rllib: str):
@@ -184,12 +190,17 @@ def main(argv):
         assert device_supports.torch, "PyTorch is not available on your device"
         from motrix_rl.rslrl.torch.train import ppo
 
-        config.torch.backend = "torch"
         trainer = ppo.Trainer(env_name, sim_backend, cfg_override=rl_override, enable_render=enable_render)
-        trainer.play(policy_path)
+        trainer.play(
+            policy_path,
+            log_state=_LOG_STATE.value,
+            log_state_every=_LOG_STATE_EVERY.value,
+            log_state_envs=_LOG_STATE_ENVS.value,
+        )
 
     elif backend == "jax":
         assert device_supports.jax, "jax is not avaliable on your device "
+        from skrl import config
         from motrix_rl.skrl.jax.train import ppo
 
         config.jax.backend = "jax"  # or "numpy"
@@ -198,6 +209,7 @@ def main(argv):
 
     elif backend == "torch":
         assert device_supports.torch, "torch is not avaliable on your device"
+        from skrl import config
         from motrix_rl.skrl.torch.train import ppo
 
         config.torch.backend = "torch"

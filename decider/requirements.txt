@@ -4,6 +4,7 @@
 # Core dependencies
 numpy>=1.19.0
 PyYAML>=5.0
+matplotlib>=3.5
 
 # State machine library
 transitions>=0.8.0
