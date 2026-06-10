@@ -172,10 +172,11 @@ conda run -n sim_soccer_rl env PYTHONPATH=./motrix_envs/src:./motrix_rl/src pyth
   - `logic/sub_statemachines/` — Basic actions: `find_ball`, `chase_ball`, `dribble`, `kick`, `go_back_to_field`
   - `logic/strategy_statemachines/` — Tactical: `attack`, `defend_ball`, `dribble_ball`, `shoot_ball`
   - `logic/policy_statemachines/` — Role: `goalkeeper`
-- **Top-level FSM** (`user_entry.py` `DeciderFSM`): 9-state soccer behavior machine — STOP, RETURN_TO_FIELD, SEARCH_BALL, APPROACH_BALL, ALIGN_BEHIND_BALL, SIDE_RECOVERY, DRIBBLE, KICK, RECOVER.
+- **Top-level FSM** (`user_entry.py` `DeciderFSM`): 10-state soccer behavior machine — STOP, RETURN_TO_FIELD, SEARCH_BALL, APPROACH_BALL, ALIGN_BEHIND_BALL, SIDE_RECOVERY, DRIBBLE, KICK, RECOVER, FALL_RECOVERY.
+  - `FALL_RECOVERY` suspends football while the simulation runs an autonomous get-up policy; the decider resumes at SEARCH_BALL when recovery completes or fails.
   - `PushToGoalController` — positions robot behind ball relative to goal with orbit/back-off collision avoidance
   - `AdvancedDribbler` — omnidirectional ball pushing using ball→goal vector field
-  - `CommandFilter` — 3-stage velocity post-processing: clipping, acceleration limiting, low-pass smoothing; plus `apply_clip_only()` (KICK push) and `apply_turn_only()` (pure rotation)
+  - `CommandFilter` — 4-stage velocity post-processing: clipping with forward-yaw envelope (reduces vx when |w| exceeds `yaw_full_speed`), acceleration limiting, low-pass smoothing; plus `apply_clip_only()` (KICK push) and `apply_turn_only()` (pure rotation)
 - **Team launch**: `scripts/start_team.sh` — uses `screen` sessions per robot.
 
 ### Simulation (`simulation/`)

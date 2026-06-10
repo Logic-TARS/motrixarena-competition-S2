@@ -42,3 +42,7 @@ build/
 /k1_model_*_torchscript.pt
 /MotrixLab/exported/model_*_torchscript.pt
 /MotrixLab/exported/k1_model_*_torchscript.pt
+/MotrixLab/runs/
+/MotrixLab/checkpoints/
+/MotrixLab/tensorboard/
+events.out.tfevents.*

@@ -63,3 +63,31 @@ class rslrl:
             algo.num_mini_batches = 4
             algo.entropy_coef = 0.0005
             algo.desired_kl = 0.01
+
+    @rlcfg("k1-getup")
+    @dataclass
+    class K1GetupRslrlPpo(RslrlCfg):
+        def __post_init__(self):
+            runner = self.runner
+            algo = runner.algorithm
+
+            self.num_envs = 2048
+            runner.seed = 1
+            runner.max_iterations = 10000
+            runner.num_steps_per_env = 24
+            runner.save_interval = 50
+            runner.experiment_name = "k1_full_body_getup"
+            runner.obs_groups = {"actor": ["policy"], "critic": ["privileged"]}
+            runner.actor.class_name = "MLPModel"
+            runner.actor.hidden_dims = [512, 256, 128]
+            runner.actor.noise_std_type = "scalar"
+            runner.actor.state_dependent_std = False
+            runner.actor.init_noise_std = 0.6
+            runner.critic.class_name = "MLPModel"
+            runner.critic.hidden_dims = [512, 256, 128]
+
+            algo.learning_rate = 5.0e-4
+            algo.num_learning_epochs = 5
+            algo.num_mini_batches = 4
+            algo.entropy_coef = 0.001
+            algo.desired_kl = 0.01

@@ -46,16 +46,30 @@ def main() -> None:
 
     obs_dim = env.observation_space.shape[0]
     act_dim = env.action_space.shape[0]
-    expected_obs = 47
-    expected_act = 12
+    expected_by_env = {
+        "k1-flat-terrain-walk": (47, 12),
+        "k1-getup": (78, 22),
+    }
+    expected_obs, expected_act = expected_by_env.get(args.env, (obs_dim, act_dim))
     if obs_dim != expected_obs or act_dim != expected_act:
         raise AssertionError(f"Expected {expected_obs}->{expected_act}, got {obs_dim}->{act_dim}")
 
     if state.obs.shape != (args.num_envs, obs_dim):
         raise AssertionError(f"Unexpected reset obs shape {state.obs.shape}")
     assert_finite("reset obs", state.obs)
+    if args.env == "k1-getup":
+        pose_one_hot = state.obs[:, 9:12]
+        if not np.all(np.isin(pose_one_hot, [0.0, 1.0])):
+            raise AssertionError("Get-up pose class must be one-hot encoded")
+        if not np.allclose(np.sum(pose_one_hot, axis=1), 1.0):
+            raise AssertionError("Get-up pose class must contain exactly one active category")
 
-    progress_key = "gait_phase" if "gait_phase" in state.info else "motion_frame"
+    if "gait_phase" in state.info:
+        progress_key = "gait_phase"
+    elif "episode_length" in state.info:
+        progress_key = "episode_length"
+    else:
+        progress_key = "motion_frame"
     first_progress = state.info[progress_key].copy()
     for step_idx in range(args.steps):
         if args.zero_action:

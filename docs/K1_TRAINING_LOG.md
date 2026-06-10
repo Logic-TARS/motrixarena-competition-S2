@@ -1,8 +1,15 @@
 # K1 训练配置修复与优化日志
 
 > **⚠️ 历史文档 (2026-05-23)** — 描述的是早期 52 维观测版本的训练配置。
-> 当前 (2026-06-09) 已回退到 47 维观测（`k1-flat-terrain-walk`），RSLRL 训练使用 `obs_normalization=True`。
+> 当前 (2026-06-10) 已回退到 47 维观测（`k1-flat-terrain-walk`），RSLRL 训练使用 `obs_normalization=True`。
 > 当前最新训练配置见 `MotrixLab/motrix_envs/src/motrix_envs/locomotion/k1/cfg.py`。
+>
+> **2026-06-10 重要变更**:
+> - `ang_vel_yaw` 从 [-0.1, 0.1] 扩大到 [-1.5, 1.5]，新增 yaw curriculum (0.3→0.6→1.0→1.5)
+> - 新增 stand/straight/turn 模式采样 (10%/25%/20%)
+> - forward-yaw envelope: 大角度转弯时自动降低前进速度
+> - 初始化噪声 + 领域随机化加强 (max_push_vel_xy 0.1→0.4)
+> - termination penalty -10.0 + only_positive_rewards=False + collision/action_rate 惩罚开启
 
 日期: 2026-05-23
 

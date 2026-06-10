@@ -14,12 +14,15 @@
 # ==============================================================================
 
 from . import (
+    getup_np,  # noqa: F401 register envs
     walk_np,  # noqa: F401 register envs
 )
 from .cfg import (  # noqa: F401
     K1WalkNpEnvCfg,
 )
+from .getup_cfg import K1GetupNpEnvCfg  # noqa: F401
 
 __all__ = [
     "K1WalkNpEnvCfg",
+    "K1GetupNpEnvCfg",
 ]
