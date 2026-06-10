@@ -128,7 +128,8 @@ class FindBallStateMachine:
     def start_rotation_and_forwarding(self, event=None):
         """开始旋转身体寻找球"""
         self.logger.debug("[FIND BALL FSM] Starting rotation...")
-        ball_angle_from_other_robots = self.agent.get_ball_angle_from_other_robots()
+        get_shared_ball_angle = getattr(self.agent, "get_ball_angle_from_other_robots", None)
+        ball_angle_from_other_robots = get_shared_ball_angle() if callable(get_shared_ball_angle) else None
         
         ball_history = self.agent.get_ball_history()
         if len(ball_history) >= 2 and ball_history[-1] and ball_history[-2] and time.time() - ball_history[-1]['timestamp'] < 5:

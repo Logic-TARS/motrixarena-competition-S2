@@ -30,3 +30,15 @@ build/
 .vscode/
 .idea/
 .DS_Store
+
+# Local Codex/Claude workspace state
+/.claude/
+
+# Generated match recordings and trajectory reports
+/video/
+
+# Locally exported training checkpoints
+/model_*.pt
+/k1_model_*_torchscript.pt
+/MotrixLab/exported/model_*_torchscript.pt
+/MotrixLab/exported/k1_model_*_torchscript.pt

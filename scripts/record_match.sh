@@ -4,6 +4,7 @@
 # Usage: ./scripts/record_match.sh                  # walk test, 20 s
 #        ./scripts/record_match.sh --play           # full game (DeciderFSM)
 #        ./scripts/record_match.sh --d 30 --output /tmp/my_match.mp4
+#        ./scripts/record_match.sh --play --trajectory --d 30
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -15,20 +16,33 @@ check_uv
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 OUTPUT="${OUTPUT:-$REPO_ROOT/video/match_${TIMESTAMP}.mp4}"
+if [[ "$TRAJECTORY_ENABLED" -eq 1 ]]; then
+    TRAJECTORY_DIR="${TRAJECTORY_DIR:-$REPO_ROOT/video/trajectory_${TIMESTAMP}}"
+    mkdir -p "$TRAJECTORY_DIR"
+fi
 FRAME_DIR="$(mktemp -d /tmp/sim_frames_XXXXX)"
-SIM_EXTRA="--record-video $FRAME_DIR"
+SIM_EXTRA="$SIM_EXTRA --record-video $FRAME_DIR"
 
 # --- cleanup ---
 cleanup() {
     echo "=== Stopping ==="
-    kill $SIM_PID $DECIDER_PID 2>/dev/null || true
-    wait $SIM_PID $DECIDER_PID 2>/dev/null || true
+    if [[ -n "${DECIDER_PID:-}" ]]; then
+        kill "$DECIDER_PID" 2>/dev/null || true
+        wait "$DECIDER_PID" 2>/dev/null || true
+    fi
+    if [[ -n "${SIM_PID:-}" ]]; then
+        kill "$SIM_PID" 2>/dev/null || true
+        wait "$SIM_PID" 2>/dev/null || true
+    fi
     echo "=== Encoding video ==="
     cd "$REPO_ROOT"
     mkdir -p "$(dirname "$OUTPUT")"
     ffmpeg -y -framerate 30 -i "$FRAME_DIR/frame_%06d.png" \
         -c:v libx264 -pix_fmt yuv420p -loglevel warning "$OUTPUT" && \
         echo "Done: $OUTPUT" || echo "FFmpeg failed. Frames in: $FRAME_DIR"
+    if [[ "$TRAJECTORY_ENABLED" -eq 1 ]]; then
+        echo "Trajectory: $TRAJECTORY_DIR"
+    fi
     rm -rf "$FRAME_DIR"
 }
 trap cleanup EXIT

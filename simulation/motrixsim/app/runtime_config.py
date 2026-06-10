@@ -491,8 +491,11 @@ class RuntimeArgs:
     max_red_robots: int
     max_blue_robots: int
     use_referee: bool
+    referee_state: str
     policy_device: str
     real_time: bool
+    policy_debug: bool = False
+    policy_debug_interval: int = 50
     record_video: str | None = None
     # Blue team policy config.  When identical to red, this is the same object.
     blue_robot_cfg: RobotRuntimeConfig | None = None
@@ -540,15 +543,27 @@ def infer_k1_pt_policy_io(path: Path) -> tuple[int, int] | None:
     sd = ckpt.get("model_state_dict", ckpt)
     if not isinstance(sd, dict):
         return None
+    # Support "actor.<N>.weight" naming (e.g. legged_gym checkpoints).
     actor_keys = sorted(
         (k for k in sd if re.match(r"^actor\.\d+\.weight$", k)),
         key=lambda s: int(s.split(".")[1]),
     )
-    if not actor_keys:
-        return None
-    w0 = sd[actor_keys[0]]
-    wn = sd[actor_keys[-1]]
-    return (int(w0.shape[1]), int(wn.shape[0]))
+    if actor_keys:
+        w0 = sd[actor_keys[0]]
+        wn = sd[actor_keys[-1]]
+        return (int(w0.shape[1]), int(wn.shape[0]))
+    # Support RSL-RL "actor_state_dict" with "mlp.<N>.weight" naming.
+    actor_sd = ckpt.get("actor_state_dict")
+    if isinstance(actor_sd, dict):
+        mlp_keys = sorted(
+            (k for k in actor_sd if re.match(r"^mlp\.\d+\.weight$", k)),
+            key=lambda s: int(s.split(".")[1]),
+        )
+        if mlp_keys:
+            w0 = actor_sd[mlp_keys[0]]
+            wn = actor_sd[mlp_keys[-1]]
+            return (int(w0.shape[1]), int(wn.shape[0]))
+    return None
 
 
 def infer_k1_onnx_io(path: Path) -> tuple[int, int] | None:
@@ -788,10 +803,17 @@ def parse_runtime_args(mujoco_dir: Path) -> RuntimeArgs:
     parser.add_argument("--port", type=int, default=5555, help="ZeroMQ REP port.")
     parser.add_argument("--use-referee", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument(
+        "--referee-state",
+        type=str,
+        choices=["initial", "ready", "set", "playing", "finished"],
+        default="initial",
+        help="Initial referee/GameController state when --use-referee is enabled.",
+    )
+    parser.add_argument(
         "--real-time",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Run simulation in real-time pace. Default false: run as fast as possible.",
+        help="Run simulation in real-time pace. Default true; pass --no-real-time to run as fast as possible.",
     )
     parser.add_argument(
         "--policy-device",
@@ -840,13 +862,26 @@ def parse_runtime_args(mujoco_dir: Path) -> RuntimeArgs:
         "--record-video",
         type=str,
         default=None,
-        help="Save top-down frames to DIR at 30 fps (implies --no-webview --no-real-time). "
+        help="Save top-down frames to DIR at 30 fps (implies --no-webview). "
+        "Recording stays real-time by default so decider closed-loop timing matches WebView. "
+        "Pass --no-real-time explicitly for as-fast-as-possible offline recording. "
         "Combine with: ffmpeg -framerate 30 -i DIR/frame_%%06d.png -c:v libx264 output.mp4",
+    )
+    parser.add_argument(
+        "--policy-debug",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Print periodic red robot policy diagnostics: command, base height/tilt, obs/action ranges, and timing mode.",
+    )
+    parser.add_argument(
+        "--policy-debug-interval",
+        type=int,
+        default=50,
+        help="Policy control frames between --policy-debug lines.",
     )
     ns = parser.parse_args()
     if ns.record_video:
         ns.webview = False
-        ns.real_time = False
     team_size = _clamp_team_count(ns.team_size)
     robot_cfg = build_robot_runtime_config(
         mujoco_dir,
@@ -894,8 +929,11 @@ def parse_runtime_args(mujoco_dir: Path) -> RuntimeArgs:
         max_red_robots=team_size,
         max_blue_robots=team_size,
         use_referee=ns.use_referee,
+        referee_state=ns.referee_state,
         policy_device=ns.policy_device,
         real_time=ns.real_time,
+        policy_debug=ns.policy_debug,
+        policy_debug_interval=max(1, int(ns.policy_debug_interval)),
         record_video=ns.record_video,
         blue_robot_cfg=blue_robot_cfg,
     )

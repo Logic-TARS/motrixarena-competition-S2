@@ -64,6 +64,10 @@ Key CLI flags for `runner.py` / `sim2sim_runner.py`:
 - `--k1-legged-gym` / `--no-k1-legged-gym` — toggle 47→12 legged locomotion policy
 - `--policy-device cpu|gpu` — inference device (default: gpu)
 - `--webview` / `--no-webview` — enable/disable WebView streaming
+- `--referee-state initial|ready|set|playing|finished` — initial GameController state when `--use-referee`
+- `--policy-debug` / `--no-policy-debug` — print periodic policy diagnostics (obs/act ranges, cmd, base height, timing)
+- `--policy-debug-interval N` — control frames between `--policy-debug` print lines (default: 50)
+- `--blue-policy PATH` / `--blue-policy-flavor FLAVOR` — different policy for blue team
 
 ### Start a Single Decider
 ```bash
@@ -74,6 +78,26 @@ Key CLI flags for `runner.py` / `sim2sim_runner.py`:
 # Or directly:
 PYTHONPATH=decider:$PYTHONPATH uv run --directory MotrixLab python -u decider/decider.py --simulation --ip 127.0.0.1 --port 5555 --color red --id 0
 ```
+
+Key decider CLI flags:
+- `--simulation` — run in ZMQ/simulation mode (no ROS)
+- `--color red|blue` — team color
+- `--id N` — robot player number within team (0-indexed)
+- `--sim-hz N` — control frequency in Hz (default: 50)
+- `--sim-fixed-cmd vx,vy,w` — bypass FSM, send fixed normalized command (debug)
+- `--record-trajectory` — enable trajectory CSV recording
+- `--trajectory-dir PATH` — trajectory output directory (also enables recording)
+
+### Trajectory Recording
+```bash
+# Record match with trajectory diagnostics:
+./scripts/record_match.sh --play --trajectory --d 30
+
+# Watch live with trajectory recording:
+./scripts/watch.sh --play --trajectory
+```
+Output per run: `trajectory.csv` + `trajectory_xy.png` + `trajectory_timeseries.png` + `summary.json`.
+See `decider/trajectory.py` (recorder) and `decider/scripts/analyze_trajectory.py` (offline analysis).
 
 ### Start a Full Team
 ```bash
@@ -112,6 +136,16 @@ cd MotrixLab
 bash scripts/train_k1.sh                          # RSLRL, 4096 envs, seed 1
 bash scripts/train_k1.sh --resume-policy PATH     # resume from checkpoint
 ```
+
+### K1 Model Export (REQUIRED for simulation)
+**RSLRL checkpoints CANNOT be used directly in the soccer simulation.** The checkpoint lacks the `EmpiricalNormalization` module that training baked into the model (`obs_normalization=True`). You must export to TorchScript first:
+```bash
+cd MotrixLab
+uv run python scripts/export_k1_rslrl_torchscript.py \
+    runs/k1-flat-terrain-walk/rslrl/<run_dir>/model_NNN.pt \
+    -o exported/model_NNN_torchscript.pt
+```
+Then use the exported `.pt` in `start_sim.sh --policy`.
 The wrapper sets `CUDA_VISIBLE_DEVICES=0`, syncs RSLRL extras, and runs `train.py --env k1-flat-terrain-walk --rllib rslrl --num-envs 4096 --seed 1`.
 
 ### Playing / Evaluating Policies
@@ -138,6 +172,10 @@ conda run -n sim_soccer_rl env PYTHONPATH=./motrix_envs/src:./motrix_rl/src pyth
   - `logic/sub_statemachines/` — Basic actions: `find_ball`, `chase_ball`, `dribble`, `kick`, `go_back_to_field`
   - `logic/strategy_statemachines/` — Tactical: `attack`, `defend_ball`, `dribble_ball`, `shoot_ball`
   - `logic/policy_statemachines/` — Role: `goalkeeper`
+- **Top-level FSM** (`user_entry.py` `DeciderFSM`): 9-state soccer behavior machine — STOP, RETURN_TO_FIELD, SEARCH_BALL, APPROACH_BALL, ALIGN_BEHIND_BALL, SIDE_RECOVERY, DRIBBLE, KICK, RECOVER.
+  - `PushToGoalController` — positions robot behind ball relative to goal with orbit/back-off collision avoidance
+  - `AdvancedDribbler` — omnidirectional ball pushing using ball→goal vector field
+  - `CommandFilter` — 3-stage velocity post-processing: clipping, acceleration limiting, low-pass smoothing; plus `apply_clip_only()` (KICK push) and `apply_turn_only()` (pure rotation)
 - **Team launch**: `scripts/start_team.sh` — uses `screen` sessions per robot.
 
 ### Simulation (`simulation/`)
@@ -163,9 +201,10 @@ conda run -n sim_soccer_rl env PYTHONPATH=./motrix_envs/src:./motrix_rl/src pyth
 
 ### Coordinate System
 - **Robot frame**: X = forward, Y = left, Theta = CCW (radians), 0 = straight ahead
-- **Map frame**: Y = toward opponent goal, X = right side
-- Blue team coordinates are mirrored so both teams reuse the same strategy code.
+- **Map frame**: X = toward opponent goal (length-wise), Y = left (width-wise). Goals are at `X = ±field_length/2`, red attacks +X.
+- Blue team coordinates are mirrored 180° (`-x, -y, theta+π`) so both teams reuse the same strategy code with local +X = own attack direction.
 - Ball angle: `atan2(ball_y, ball_x)` — positive = left of robot.
+- Field size is loaded from `match_config.json` at runtime and written to `config["active_field_size"]`. Falls back to `config.yaml` league `field_size` if unavailable.
 
 ### Robot ID Mapping (fixed regardless of team size)
 - `0..6` → `robot_rp0..robot_rp6` (red team)
@@ -214,7 +253,9 @@ agent.state_machine_runners['goalkeeper']()
 - **`motrixlab`** (default) — policies trained by MotrixLab/motrix_envs `k1-flat-terrain-walk`. Uses MotrixLab-specific observation scales, action scales, PD gains, and torque limits (see `K1_MOTRIXLAB_*` constants).
 - **`legged_gym`** — legacy policies trained by legged_gym (T1/T1_config.py). Uses different scaling/PD constants (see `K1_LEGGED_GYM_*` constants).
 
-Select with `--k1-policy-flavor motrixlab|legged_gym`. The default walk policy is `simulation/motrixsim/assets/policies/k1_walk_model_3600_motrixlab.pt`.
+Select with `--k1-policy-flavor motrixlab|legged_gym`. The default walk policy is `MotrixLab/exported/model_1350_torchscript.pt`.
+
+**Per-team policy**: `--blue-policy PATH` / `--blue-policy-flavor FLAVOR` allows blue team to use a different model. Blue team defaults to `model_4700.pt` (legged_gym flavor). Flavor is correctly applied per-robot in `_build_robot_specs`, `_obs_k1_legged_gym`, and action application.
 
 ### K1 Policy Mixing (runtime_config.py)
 When the leg-control policy (47→12) is active and a full-body stand policy (`k1_model_46000.pt`, 78→22) exists, the runner auto-mixes: small velocity commands use the 78→22 full-body policy (standing/upper-body posture), while larger commands switch to the 47→12 leg-control policy (with hysteresis to avoid oscillation). Disable with `--no-k1-legged-gym`.
@@ -226,7 +267,7 @@ All MotrixLab scripts use `from _source_path import ensure_source_path; ensure_s
 `decider/strategy/team_manager.py` implements a multi-agent coordination system (role assignment, world model fusion) — intended architecture for team play, currently work-in-progress.
 
 ### Active game() Function
-The active function in `decider/user_entry.py` is `_gc_test_go_back_to_field` (GameController test mode). Other test modes exist in the same file (`_playing_logic`, `_test_adv_dribble`, etc.). Switch by editing the `game()` function body.
+In simulation mode (`is_simulation=True`), `game()` creates a `DeciderFSM` instance and calls `decider.tick()` each frame — this is the primary control path. In ROS mode, it falls through to `_gc_test_go_back_to_field` (GameController test). Other test modes exist in the same file (`_playing_logic`, `_test_adv_dribble`, etc.). Switch by editing the `game()` function body.
 
 ### Docker (Isaac Sim, legacy)
 `Dockerfile` and `compose.yaml` target the NVIDIA Isaac Sim image — this is a legacy/alternate deployment path, not the primary MotrixSim workflow.

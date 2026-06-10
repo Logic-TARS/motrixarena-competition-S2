@@ -1,5 +1,9 @@
 # K1 训练配置修复与优化日志
 
+> **⚠️ 历史文档 (2026-05-23)** — 描述的是早期 52 维观测版本的训练配置。
+> 当前 (2026-06-09) 已回退到 47 维观测（`k1-flat-terrain-walk`），RSLRL 训练使用 `obs_normalization=True`。
+> 当前最新训练配置见 `MotrixLab/motrix_envs/src/motrix_envs/locomotion/k1/cfg.py`。
+
 日期: 2026-05-23
 
 ## 审查发现的问题 (5项)

@@ -4,6 +4,7 @@
 # Usage: ./scripts/watch.sh                  # walk test
 #        ./scripts/watch.sh --play           # full game (DeciderFSM)
 #        ./scripts/watch.sh --team-size 3    # 3v3
+#        ./scripts/watch.sh --play --trajectory
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -13,12 +14,27 @@ source "$SCRIPT_DIR/match_config.sh"
 parse_args "$@"
 check_uv
 
+if [[ "$TRAJECTORY_ENABLED" -eq 1 ]]; then
+    TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+    TRAJECTORY_DIR="${TRAJECTORY_DIR:-$REPO_ROOT/debug_logs/trajectory_${TIMESTAMP}}"
+    mkdir -p "$TRAJECTORY_DIR"
+fi
+
 # --- cleanup ---
 cleanup() {
     echo ""
     echo "=== Stopping ==="
-    kill $SIM_PID $DECIDER_PID 2>/dev/null || true
-    wait $SIM_PID $DECIDER_PID 2>/dev/null || true
+    if [[ -n "${DECIDER_PID:-}" ]]; then
+        kill "$DECIDER_PID" 2>/dev/null || true
+        wait "$DECIDER_PID" 2>/dev/null || true
+    fi
+    if [[ -n "${SIM_PID:-}" ]]; then
+        kill "$SIM_PID" 2>/dev/null || true
+        wait "$SIM_PID" 2>/dev/null || true
+    fi
+    if [[ "$TRAJECTORY_ENABLED" -eq 1 ]]; then
+        echo "Trajectory: $TRAJECTORY_DIR"
+    fi
     echo "=== Done ==="
 }
 trap cleanup EXIT

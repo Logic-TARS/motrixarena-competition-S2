@@ -115,7 +115,7 @@ class Commands:
     ]
     lin_vel_x = [0.0, 1.0]
     lin_vel_y = [-0.2, 0.2]
-    ang_vel_yaw = [-1.0, 1.0]
+    ang_vel_yaw = [-0.1, 0.1]  # Narrowed from [-1.0, 1.0] — focus on forward walking first
     resampling_time: float = 10.0
     command_deadzone: float = 0.2
     phase_period: float = 0.8
@@ -148,7 +148,7 @@ class Noise:
 class DomainRand:
     push_robots: bool = True
     push_interval_s: float = 8.0
-    max_push_vel_xy: float = 0.5
+    max_push_vel_xy: float = 0.1  # Reduced from 0.5 — gentler for early walking
 
 
 @dataclass
@@ -174,25 +174,25 @@ class RewardConfig:
     scales: dict[str, float] = field(
         default_factory=lambda: {
             "termination": -0.0,
-            "tracking_lin_vel": 1.0,
+            "tracking_lin_vel": 2.0,
             "tracking_ang_vel": 2.0,
             "lin_vel_z": -2.0,
             "ang_vel_xy": -0.05,
             "orientation": -1.0,
             "base_height": -10.0,
-            "torques": -1.0e-5,
-            "dof_vel": -1.0e-3,
+            "torques": 0.0,  # Zeroed — was -1e-5, penalises leg movement
+            "dof_vel": 0.0,  # Zeroed — was -1e-3, penalises joint velocity
             "dof_acc": -2.5e-7,
             "feet_air_time": 0.0,
             "collision": 0.0,
-            "action_rate": -0.01,
+            "action_rate": 0.0,  # Zeroed — was -0.01, penalises changing actions
             "dof_pos_limits": -5.0,
-            "alive": 0.15,
+            "alive": 0.05,
             "hip_pos": -1.0,
             "contact_no_vel": -0.2,
             "feet_swing_height": -20.0,
             "contact": 0.18,
-            "straight_motion": 1.5,
+            "straight_motion": -1.5,
             "command_forward_vel": 0.3,
             "overspeed": -0.3,
         }

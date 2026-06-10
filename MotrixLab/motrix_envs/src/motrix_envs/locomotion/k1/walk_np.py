@@ -461,7 +461,10 @@ class K1WalkTask(NpEnv):
     def _reward_command_forward_vel(self, data, commands: np.ndarray):
         forward_vel = self.get_local_linvel(data)[:, 0]
         command_vel = np.maximum(commands[:, 0], 1.0e-5)
-        reward = np.clip(forward_vel, 0.0, command_vel) / command_vel
+        # Allow negative reward for backward velocity so the policy has a
+        # gradient pushing it away from backward motion.  The reward is
+        # clipped to [-1, 1] so a single reward term cannot dominate the total.
+        reward = np.clip(forward_vel, -command_vel, command_vel) / command_vel
         return reward * self._reward_forward_posture_gate(data) * self._reward_forward_straight_gate(data, commands)
 
     def _reward_overspeed(self, data, commands: np.ndarray):
@@ -473,14 +476,15 @@ class K1WalkTask(NpEnv):
         cfg = self.cfg.reward_config
         local_vel = self.get_local_linvel(data)
         yaw_error = self.get_gyro(data)[:, 2] - commands[:, 2]
-        # Only penalize lateral/yaw when commanded to go (mostly) forward.
+        # Always penalize yaw tracking error — the robot should never spin on
+        # its own regardless of lateral velocity command.
+        yaw_penalty = cfg.straight_motion_yaw_weight * np.square(yaw_error)
+        # Only penalize lateral velocity when commanded to go (mostly) forward.
         # Without this gate, straight_motion would conflict with lateral
         # velocity commands, pulling the policy in opposite directions.
         is_forward = (np.abs(commands[:, 1]) < 0.15).astype(np.float32)
-        penalty = cfg.straight_motion_yaw_weight * np.square(yaw_error) + cfg.straight_motion_lateral_weight * np.square(
-            local_vel[:, 1]
-        )
-        return is_forward * penalty
+        lateral_penalty = is_forward * cfg.straight_motion_lateral_weight * np.square(local_vel[:, 1])
+        return yaw_penalty + lateral_penalty
 
     def _reward_forward_posture_gate(self, data):
         pose = self._body.get_pose(data)
@@ -511,14 +515,6 @@ class K1WalkTask(NpEnv):
         return (cfg.forward_reward_min_gate + (1.0 - cfg.forward_reward_min_gate) * yaw_gate * lateral_gate).astype(
             np.float32
         )
-
-    def _reward_stand_still(self, data, commands: np.ndarray):
-        command_speed = np.linalg.norm(commands[:, :2], axis=1)
-        actual_speed = np.linalg.norm(self.get_local_linvel(data)[:, :2], axis=1)
-        return ((command_speed > 0.2) & (actual_speed < 0.08)).astype(np.float32)
-
-    def _reward_joint_regularization(self, data):
-        return np.sum(np.square(self.get_dof_pos(data) - self.default_angles), axis=1)
 
     def _reward_dof_pos_limits(self, data):
         dof_pos = self.get_dof_pos(data)
