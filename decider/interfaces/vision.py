@@ -96,6 +96,10 @@ class Vision(Node):
         self._last_ball_time = 0
         self.self_pos = np.array([0,0])
         self.self_yaw = 0
+        self.recovery_state = "LOCOMOTION"
+        self.recovery_pose = ""
+        self.recovery_attempts = 0
+        self.recovery_elapsed = 0.0
         self._self_pos_accuracy = 0
         self._ball_pos_accuracy = 0
         self.ball_distance = 6000
@@ -232,6 +236,10 @@ class Vision(Node):
             # MOS Yaw: 0=Forward(X+), 90=Left(Y+), -90=Right
             mos_theta_rad = sim_theta
             self.self_yaw = self.agent.angle_normalize(mos_theta_rad) * 180.0 / math.pi
+            self.recovery_state = str(robot.get("recovery_state", "LOCOMOTION"))
+            self.recovery_pose = str(robot.get("recovery_pose", ""))
+            self.recovery_attempts = int(robot.get("recovery_attempts", 0))
+            self.recovery_elapsed = float(robot.get("recovery_elapsed", 0.0))
             
             self.logger.debug(f"[Vision] Updated robot pose: pos={self.self_pos}, yaw={self.self_yaw:.2f}deg")
         else:

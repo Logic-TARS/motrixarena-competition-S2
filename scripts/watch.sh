@@ -1,10 +1,10 @@
 #!/bin/bash
 # One-click: launch simulation + decider and open WebView for real-time watching.
-# Default: straight-line walk test.  Edit match_config.sh to change defaults.
-# Usage: ./scripts/watch.sh                  # walk test
-#        ./scripts/watch.sh --play           # full game (DeciderFSM)
+# Default: continuous PushToGoal in STATE_PLAYING.
+# Usage: ./scripts/watch.sh                  # PushToGoal game
+#        ./scripts/watch.sh --play           # compatibility alias
 #        ./scripts/watch.sh --team-size 3    # 3v3
-#        ./scripts/watch.sh --play --trajectory
+#        ./scripts/watch.sh --trajectory
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

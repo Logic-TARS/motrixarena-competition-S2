@@ -24,6 +24,7 @@ from motrix_envs.math import quaternion
 from motrix_envs.np.env import NpEnv, NpEnvState
 
 
+@registry.env("k1-flat-terrain-walk-speed", sim_backend="np")
 @registry.env("k1-flat-terrain-walk", sim_backend="np")
 class K1WalkTask(NpEnv):
     def __init__(self, cfg: K1WalkNpEnvCfg, num_envs=1):
@@ -228,10 +229,58 @@ class K1WalkTask(NpEnv):
         return state
 
     def _maybe_resample_commands(self, info: dict) -> None:
-        resampling_steps = max(int(self.cfg.commands.resampling_time / self.cfg.ctrl_dt), 1)
+        cfg = self.cfg.commands
+        resampling_steps = max(int(cfg.resampling_time / self.cfg.ctrl_dt), 1)
         resample_mask = (info["episode_length"] % resampling_steps) == 0
+
+        # Sustained-turn curriculum: when the policy is at a curriculum
+        # level that requires prolonged turning, high-yaw / low-vx commands
+        # are held for turn_sustain_curriculum[level] consecutive steps
+        # before a resample is allowed.  This trains the policy to maintain
+        # stability during the long-duration turns that soccer navigation
+        # (ESCAPE_FACE, orbit, etc.) requires.
+        #
+        # The counter must tick every frame (not just resample frames) so
+        # that it measures true consecutive turn-command steps.
+        commands = info["commands"]
+        sustain_steps = int(cfg.turn_sustain_curriculum[self._curriculum_level])
+        if sustain_steps > 0:
+            is_turn_cmd = (
+                (np.abs(commands[:, 2]) > 0.3)
+                & (commands[:, 0] < 0.15)
+            )
+            counter = info.get("turn_sustain_counter")
+            if counter is None:
+                counter = np.zeros(self._num_envs, dtype=np.int32)
+                info["turn_sustain_counter"] = counter
+            counter[is_turn_cmd] += 1
+            counter[~is_turn_cmd] = 0
+            skip = is_turn_cmd & (counter < sustain_steps)
+            resample_mask = resample_mask & ~skip
+
+        # Direction-change flip: mirror w sign every
+        # direction_change_period_steps for envs that received a
+        # direction_change command.  The flip fires on every frame — it
+        # is independent of the resample schedule.
+        flip_steps = int(cfg.direction_change_period_steps)
+        if flip_steps > 0:
+            dir_counter = info.get("direction_change_counter")
+            if dir_counter is None:
+                dir_counter = np.zeros(self._num_envs, dtype=np.int32)
+                info["direction_change_counter"] = dir_counter
+            dir_counter += 1
+            flip_now = dir_counter >= flip_steps
+            if np.any(flip_now):
+                info["commands"][flip_now, 2] *= -1.0
+                dir_counter[flip_now] = 0
+
         if np.any(resample_mask):
             info["commands"][resample_mask] = self.resample_commands(int(np.sum(resample_mask)))
+            # A fresh command resets the direction-change flip timer so
+            # that only envs running the same direction_change command
+            # for the full period will flip.
+            if "direction_change_counter" in info:
+                info["direction_change_counter"][resample_mask] = 0
 
     def _maybe_push_robots(self, state: NpEnvState) -> None:
         cfg = self.cfg.domain_rand
@@ -339,27 +388,82 @@ class K1WalkTask(NpEnv):
         cfg = self.cfg.commands
         commands = np.zeros((num_envs, 3), dtype=np.float32)
         yaw_limit = float(cfg.yaw_curriculum[self._curriculum_level])
+
+        # --- base values for all envs (full-range sampling) ---
         commands[:, 0] = np.random.uniform(*cfg.lin_vel_x, size=num_envs)
         commands[:, 1] = np.random.uniform(*cfg.lin_vel_y, size=num_envs)
         commands[:, 2] = np.random.uniform(-yaw_limit, yaw_limit, size=num_envs)
 
+        # --- mode-specific overrides ---
         mode = np.random.rand(num_envs)
         stand_end = cfg.stand_probability
         straight_end = stand_end + cfg.straight_probability
         turn_end = straight_end + cfg.turn_probability
+        mixed_end = turn_end + cfg.mixed_turn_probability
+        dirchg_end = mixed_end + cfg.direction_change_probability
+        sprint_end = dirchg_end + cfg.sprint_turn_probability
         stand = mode < stand_end
         straight = (mode >= stand_end) & (mode < straight_end)
         turn = (mode >= straight_end) & (mode < turn_end)
+        mixed_turn = (mode >= turn_end) & (mode < mixed_end)
+        direction_change = (mode >= mixed_end) & (mode < dirchg_end)
+        sprint_turn = (mode >= dirchg_end) & (mode < sprint_end)
+        self._last_command_modes = {
+            "stand": stand,
+            "straight": straight,
+            "turn": turn,
+            "mixed_turn": mixed_turn,
+            "direction_change": direction_change,
+            "sprint_turn": sprint_turn,
+            "random": mode >= sprint_end,
+        }
+        # random: remaining fraction — keep base values as-is
+
         commands[stand] = 0.0
         commands[straight, 1:] = 0.0
+        if cfg.straight_vx_range is not None and np.any(straight):
+            commands[straight, 0] = np.random.uniform(
+                *cfg.straight_vx_range,
+                size=int(np.sum(straight)),
+            )
         commands[turn, :2] = 0.0
+        # mixed_turn: low forward speed + high yaw — mirrors decider's
+        # continuous blending (robot always moves forward while turning).
+        if np.any(mixed_turn):
+            vx_low, vx_high = float(cfg.mixed_turn_vx_range[0]), float(cfg.mixed_turn_vx_range[1])
+            commands[mixed_turn, 0] = np.random.uniform(vx_low, vx_high, size=int(np.sum(mixed_turn)))
+            commands[mixed_turn, 1] = 0.0
+            # Bias yaw toward the upper half of the allowed range so these
+            # commands stress the sustained-turning regime.
+            half_yaw = 0.5 * yaw_limit
+            commands[mixed_turn, 2] = np.random.uniform(half_yaw, yaw_limit, size=int(np.sum(mixed_turn)))
+            commands[mixed_turn, 2] *= np.random.choice([-1.0, 1.0], size=int(np.sum(mixed_turn)))
+        # direction_change: low forward speed + high yaw reversed on a fast
+        # cadence to train agile re-orientation (soccer orbit, escape, intercept).
+        if np.any(direction_change):
+            vx_low, vx_high = float(cfg.direction_change_vx_range[0]), float(cfg.direction_change_vx_range[1])
+            commands[direction_change, 0] = np.random.uniform(vx_low, vx_high, size=int(np.sum(direction_change)))
+            commands[direction_change, 1] = 0.0
+            yaw_low, yaw_high = float(cfg.direction_change_yaw_range[0]), float(cfg.direction_change_yaw_range[1])
+            yaw_mag = np.random.uniform(yaw_low, min(yaw_high, yaw_limit), size=int(np.sum(direction_change)))
+            commands[direction_change, 2] = yaw_mag * np.random.choice([-1.0, 1.0], size=int(np.sum(direction_change)))
+        # sprint_turn: high forward speed + large yaw simultaneously.
+        # The hardest locomotion pattern — the robot must stay upright
+        # while sprinting through a sharp turn.
+        if np.any(sprint_turn):
+            vx_low, vx_high = float(cfg.sprint_turn_vx_range[0]), float(cfg.sprint_turn_vx_range[1])
+            commands[sprint_turn, 0] = np.random.uniform(vx_low, vx_high, size=int(np.sum(sprint_turn)))
+            commands[sprint_turn, 1] = 0.0
+            yaw_low, yaw_high = float(cfg.sprint_turn_yaw_range[0]), float(cfg.sprint_turn_yaw_range[1])
+            yaw_mag = np.random.uniform(yaw_low, min(yaw_high, yaw_limit), size=int(np.sum(sprint_turn)))
+            commands[sprint_turn, 2] = yaw_mag * np.random.choice([-1.0, 1.0], size=int(np.sum(sprint_turn)))
 
         commands = apply_forward_yaw_envelope(
             commands,
             max_forward_speed=cfg.lin_vel_x[1],
             yaw_full_speed=cfg.yaw_full_speed,
             yaw_zero_speed=cfg.yaw_zero_speed,
-        )
+        ) if cfg.apply_forward_yaw_envelope else commands
         moving = np.linalg.norm(commands[:, :2], axis=1) > cfg.command_deadzone
         commands[:, :2] *= moving[:, None]
         return commands.astype(np.float32)
@@ -466,6 +570,8 @@ class K1WalkTask(NpEnv):
             ),
             "feet_pos": self._get_foot_positions(data),
             "feet_vel": self._get_foot_velocities(data),
+            "turn_sustain_counter": np.zeros((num_reset,), dtype=np.int32),
+            "direction_change_counter": np.zeros((num_reset,), dtype=np.int32),
         }
         return self._get_obs(data, info), info
 
@@ -491,6 +597,10 @@ class K1WalkTask(NpEnv):
             "straight_motion": self._reward_straight_motion(data, commands),
             "command_forward_vel": self._reward_command_forward_vel(data, commands),
             "overspeed": self._reward_overspeed(data, commands),
+            "turn_stability": self._reward_turn_stability(data, commands),
+            "turn_survival": self._reward_turn_survival(data, commands),
+            "direction_change_tracking": self._reward_direction_change_tracking(data, commands, info),
+            "sprint_stability": self._reward_sprint_stability(data, commands),
         }
         if self.foot_check_num > 0:
             result["feet_air_time"] = self._reward_feet_air_time(commands, info)
@@ -558,6 +668,75 @@ class K1WalkTask(NpEnv):
         forward_vel = self.get_local_linvel(data)[:, 0]
         max_forward_vel = commands[:, 0] + self.cfg.reward_config.forward_vel_margin
         return np.square(np.maximum(forward_vel - max_forward_vel, 0.0))
+
+    def _reward_turn_stability(self, data, commands: np.ndarray):
+        """Penalise body tilt during high-yaw commands.
+
+        Only active when the commanded yaw rate exceeds
+        ``turn_stability_min_yaw``.  The penalty is proportional to the
+        squared tilt excess beyond ``turn_stability_tilt_threshold``.
+        """
+        cfg = self.cfg.reward_config
+        is_turning = np.abs(commands[:, 2]) > cfg.turn_stability_min_yaw
+        if not np.any(is_turning.astype(bool)):
+            return np.zeros((data.shape[0],), dtype=np.float32)
+        pose = self._body.get_pose(data)
+        base_quat = pose[:, 3:7]
+        gravity = quaternion.rotate_inverse(base_quat, self.gravity_vec)
+        tilt = np.linalg.norm(gravity[:, :2], axis=1)
+        violation = np.maximum(tilt - cfg.turn_stability_tilt_threshold, 0.0)
+        return is_turning.astype(np.float32) * np.square(violation)
+
+    def _reward_turn_survival(self, data, commands: np.ndarray):
+        """Extra per-step reward for surviving high-yaw commands.
+
+        Added on top of the regular ``alive`` reward so the policy values
+        survival through extended turning periods.  Returns 1.0 during
+        high-yaw commands, 0.0 otherwise (weighted by ``turn_survival``).
+        """
+        cfg = self.cfg.reward_config
+        is_turning = np.abs(commands[:, 2]) > cfg.turn_stability_min_yaw
+        return is_turning.astype(np.float32)
+
+    def _reward_direction_change_tracking(self, data, commands: np.ndarray, info: dict):
+        """Boost yaw-tracking reward shortly after a direction flip.
+
+        A direction flip demands a fast motor response — the policy must
+        reverse its angular momentum within a few steps.  This reward
+        multiplies the standard tracking-sigma reward by 2× in the
+        ``direction_change_flip_window`` immediately following a flip,
+        so accurate tracking during the transient is weighted higher.
+        """
+        cfg = self.cfg.reward_config
+        counter = info.get("direction_change_counter")
+        if counter is None:
+            return np.zeros((data.shape[0],), dtype=np.float32)
+        recent_flip = (counter < cfg.direction_change_flip_window).astype(np.float32)
+        if not np.any(recent_flip.astype(bool)):
+            return np.zeros((data.shape[0],), dtype=np.float32)
+        ang_vel_error = np.square(commands[:, 2] - self.get_gyro(data)[:, 2])
+        return recent_flip * np.exp(-ang_vel_error / cfg.tracking_sigma)
+
+    def _reward_sprint_stability(self, data, commands: np.ndarray):
+        """Penalise body tilt during high-speed, high-yaw sprint-turns.
+
+        Only active when BOTH forward speed and yaw rate exceed the
+        sprint thresholds.  The squared tilt penalty is applied to
+        discourage the policy from leaning excessively during the
+        hardest command regime.
+        """
+        cfg = self.cfg.reward_config
+        is_sprinting = (
+            (commands[:, 0] > cfg.sprint_stability_min_vx)
+            & (np.abs(commands[:, 2]) > cfg.sprint_stability_min_yaw)
+        ).astype(np.float32)
+        if not np.any(is_sprinting.astype(bool)):
+            return np.zeros((data.shape[0],), dtype=np.float32)
+        pose = self._body.get_pose(data)
+        base_quat = pose[:, 3:7]
+        gravity = quaternion.rotate_inverse(base_quat, self.gravity_vec)
+        tilt = np.linalg.norm(gravity[:, :2], axis=1)
+        return is_sprinting * np.square(tilt)
 
     def _reward_straight_motion(self, data, commands: np.ndarray):
         cfg = self.cfg.reward_config

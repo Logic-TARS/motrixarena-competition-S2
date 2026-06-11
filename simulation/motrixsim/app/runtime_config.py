@@ -466,6 +466,7 @@ class RobotRuntimeConfig:
     k1_stand_policy: Path | None = None
     use_k1_amp_onnx: bool = False
     k1_policy_flavor: str = K1_POLICY_FLAVOR_LEGGED_GYM
+    k1_recovery_policy: Path | None = None
 
 
 @dataclass

@@ -12,11 +12,16 @@ DECIDER_DIR = Path(__file__).resolve().parents[1]
 if str(DECIDER_DIR) not in sys.path:
     sys.path.insert(0, str(DECIDER_DIR))
 
-from logic.command_filter import CommandFilter
+from logic.command_filter import CommandFilter, forward_speed_limit
 from user_entry import (
     AdvancedDribbler,
+    ContinuousPushToGoal,
     DeciderFSM,
+    DirectChaseConfig,
+    DirectChaseController,
+    PushToGoalConfig,
     PushToGoalController,
+    game,
     resolve_field_size,
 )
 
@@ -101,25 +106,6 @@ class FakeAgent:
                 "orbit_waypoint_tolerance": 0.12,
                 "orbit_side_deadband": 0.05,
                 "dribble_to_approach_dist": 0.9,
-                "sideline_ball_enter_margin": 0.25,
-                "sideline_ball_exit_margin": 0.55,
-                "sideline_exit_stable_frames": 5,
-                "sideline_robot_outside_margin": 0.30,
-                "sideline_robot_inside_margin": 0.15,
-                "side_recovery_setup_dist": 0.33,
-                "side_recovery_forward_weight": 0.60,
-                "side_recovery_max_linear": 0.35,
-                "side_recovery_push_vx": 0.30,
-                "side_recovery_safe_ball_dist": 0.75,
-                "side_recovery_retreat_step": 0.40,
-                "side_recovery_bypass_x_offset": 0.50,
-                "side_recovery_bypass_infield_offset": 0.55,
-                "side_recovery_cross_outside_offset": 0.12,
-                "side_recovery_stage_outside_margin": 0.28,
-                "side_recovery_cross_speed": 0.28,
-                "side_recovery_stage_tolerance": 0.10,
-                "side_recovery_face_enter_deg": 10,
-                "side_recovery_face_exit_deg": 18,
                 "kick_ball_x_min": 0.12,
                 "kick_ball_x_max": 0.30,
                 "kick_ball_y_max": 0.06,
@@ -147,6 +133,19 @@ class FakeAgent:
                 "vy_accel": 0.02,
                 "w_accel": 0.08,
                 "smooth_alpha": 0.3,
+            },
+            "push_to_goal": {
+                "behind_offset": 0.12,
+                "far_distance": 0.60,
+                "push_vx_min": 0.35,
+                "vx_gain": 2.5,
+                "vx_max": 1.0,
+                "vy_gain": 2.5,
+                "vy_max": 0.20,
+                "w_gain": 2.5,
+                "w_max": 0.45,
+                "turn_only_yaw_deg": 60.0,
+                "search_w": 0.6,
             },
         }
         self.adv_dribbler = AdvancedDribbler(self)
@@ -318,9 +317,14 @@ class AlignControllerTests(unittest.TestCase):
 
         agent.robot_yaw_deg = travel_yaw + 90.0
         turning = controller.compute_command(aligned=False)
-        self.assertEqual(turning.mode, "TURN_ONLY")
-        self.assertEqual(controller.last_mode, "TURN")
-        self.assertEqual(turning.vx, 0.0)
+        self.assertEqual(turning.mode, "NORMAL")
+        self.assertGreaterEqual(turning.vx, controller.navigation_min_vx)
+
+        fsm = DeciderFSM(agent)
+        filtered = fsm.cmd_filter.apply_clip_only(
+            turning.vx, turning.vy, turning.w
+        )
+        self.assertEqual(filtered[0], 0.0)
 
         agent.robot_yaw_deg = travel_yaw
         moving = controller.compute_command(aligned=False)
@@ -420,8 +424,11 @@ class AlignControllerTests(unittest.TestCase):
 
         face = controller.compute_command(aligned=False)
         self.assertEqual(controller.last_mode, "ESCAPE_FACE")
-        self.assertEqual(face.mode, "TURN_ONLY")
-        self.assertEqual(face.vx, 0.0)
+        # Continuous blending: vx is positive (never pure rotation)
+        self.assertEqual(face.mode, "NORMAL")
+        self.assertGreater(face.vx, 0.0)
+        self.assertNotEqual(face.w, 0.0)
+        self.assertLess(face.vx, 0.10)  # heavily scaled during escape face
 
         agent.robot_yaw_deg = math.degrees(controller.escape_yaw)
         forward = controller.compute_command(aligned=False)
@@ -433,7 +440,7 @@ class AlignControllerTests(unittest.TestCase):
         controller.compute_command(aligned=False)
         self.assertIsNone(controller.escape_phase)
 
-    def test_turn_request_brakes_before_strict_turn_only(self):
+    def test_turn_request_uses_filter_envelope_without_negative_velocity(self):
         agent = FakeAgent()
         fsm = DeciderFSM(agent)
         fsm.state = "ALIGN_BEHIND_BALL"
@@ -442,19 +449,16 @@ class AlignControllerTests(unittest.TestCase):
         agent.robot_yaw_deg = 90.0
         fsm.cmd_filter.last_cmd = (0.8, -0.2, 0.4)
 
-        first = fsm._do_align_behind_ball()
-        self.assertEqual(agent.push_to_goal.last_mode, "BRAKE")
-        self.assertGreater(first[0], 0.0)
-        self.assertLess(first[0], 0.8)
-
-        for _ in range(100):
-            cmd = fsm._do_align_behind_ball()
-            if agent.push_to_goal.last_mode == "TURN":
-                break
-        self.assertEqual(agent.push_to_goal.last_mode, "TURN")
-        self.assertEqual(cmd[0], 0.0)
-        self.assertEqual(cmd[1], 0.0)
-        self.assertEqual(fsm.cmd_filter.last_cmd[:2], (0.0, 0.0))
+        all_vx_nonnegative = True
+        any_significant_turn = False
+        for _ in range(200):
+            vx, vy, w = fsm._do_align_behind_ball()
+            if vx < 0.0:
+                all_vx_nonnegative = False
+            if abs(w) > 0.5:
+                any_significant_turn = True
+        self.assertTrue(all_vx_nonnegative)
+        self.assertTrue(any_significant_turn)
 
 
 class ApproachControllerTests(unittest.TestCase):
@@ -492,220 +496,6 @@ class ApproachControllerTests(unittest.TestCase):
         self.assertLess(abs(cmd[1]), 0.2)
         self.assertLess(abs(cmd[2]), 0.4)
 
-
-class SideRecoveryTests(unittest.TestCase):
-    def test_upper_and_lower_sidelines_use_mirrored_recovery_geometry(self):
-        agent = FakeAgent()
-        fsm = DeciderFSM(agent)
-
-        upper = fsm._side_recovery_geometry([1.0, 2.9])
-        lower = fsm._side_recovery_geometry([1.0, -2.9])
-        upper_dir = upper["recovery_dir"]
-        lower_dir = lower["recovery_dir"]
-        upper_stage = upper["staging_target"]
-        lower_stage = lower["staging_target"]
-
-        self.assertGreater(upper_dir[0], 0.0)
-        self.assertLess(upper_dir[1], 0.0)
-        self.assertGreater(lower_dir[0], 0.0)
-        self.assertGreater(lower_dir[1], 0.0)
-        self.assertAlmostEqual(upper_dir[0], lower_dir[0])
-        self.assertAlmostEqual(upper_dir[1], -lower_dir[1])
-        self.assertAlmostEqual(upper_stage[0], lower_stage[0])
-        self.assertAlmostEqual(upper_stage[1], -lower_stage[1])
-        self.assertLessEqual(abs(upper_stage[1]), 3.28)
-        np.testing.assert_allclose(
-            upper["bypass_target"],
-            [0.5, 2.45],
-        )
-        np.testing.assert_allclose(
-            upper["cross_target"],
-            [0.5, 3.12],
-        )
-
-    def test_sideline_ball_enters_recovery_state(self):
-        agent = FakeAgent()
-        fsm = DeciderFSM(agent)
-        fsm.state = "APPROACH_BALL"
-        agent.robot_w = np.array([0.5, 2.4])
-        agent.ball_w = np.array([1.0, 2.80])
-
-        fsm.tick()
-
-        self.assertEqual(fsm.state, "SIDE_RECOVERY")
-        self.assertEqual(fsm._side_recovery_phase, "RETREAT_INFIELD")
-
-    def test_robot_outside_margin_returns_before_chasing_ball(self):
-        agent = FakeAgent()
-        fsm = DeciderFSM(agent)
-        fsm.state = "APPROACH_BALL"
-        agent.robot_w = np.array([0.0, 3.31])
-        agent.ball_w = np.array([2.0, 0.0])
-
-        cmd = fsm.tick()
-
-        self.assertEqual(fsm.state, "SIDE_RECOVERY")
-        self.assertEqual(fsm._side_recovery_phase, "RETURN_FIELD")
-        self.assertEqual(cmd[0], 0.0)
-        self.assertEqual(cmd[1], 0.0)
-        self.assertLess(cmd[2], 0.0)
-
-    def test_robot_outside_margin_interrupts_search(self):
-        agent = FakeAgent()
-        fsm = DeciderFSM(agent)
-        fsm.state = "SEARCH_BALL"
-        agent.robot_w = np.array([0.0, -3.31])
-        agent.ball_visible = False
-
-        fsm.tick()
-
-        self.assertEqual(fsm.state, "SIDE_RECOVERY")
-        self.assertEqual(fsm._side_recovery_phase, "RETURN_FIELD")
-
-    def test_push_pauses_when_recovery_heading_drifts(self):
-        agent = FakeAgent()
-        fsm = DeciderFSM(agent)
-        fsm.state = "SIDE_RECOVERY"
-        fsm._side_recovery_phase = "PUSH"
-        agent.robot_w = np.array([0.8, 3.1])
-        agent.ball_w = np.array([1.0, 2.9])
-        agent.robot_yaw_deg = 90.0
-
-        cmd = fsm._do_side_recovery()
-
-        self.assertEqual(fsm._side_recovery_phase, "BRAKE_FACE_IN")
-        self.assertGreaterEqual(cmd[0], 0.0)
-
-    def test_recovery_exits_after_five_clear_frames(self):
-        agent = FakeAgent()
-        fsm = DeciderFSM(agent)
-        fsm.state = "SIDE_RECOVERY"
-        fsm._side_recovery_phase = "PUSH"
-        agent.robot_w = np.array([0.7, 2.7])
-        agent.ball_w = np.array([1.0, 2.40])
-        agent.ball_local_override = [0.30, 0.0]
-
-        for _ in range(4):
-            fsm._do_side_recovery()
-            self.assertEqual(fsm.state, "SIDE_RECOVERY")
-        fsm._do_side_recovery()
-
-        self.assertEqual(fsm.state, "ALIGN_BEHIND_BALL")
-
-    def test_lost_ball_leaves_recovery_for_search(self):
-        agent = FakeAgent()
-        fsm = DeciderFSM(agent)
-        fsm.state = "SIDE_RECOVERY"
-        agent.ball_visible = False
-
-        fsm._do_side_recovery()
-
-        self.assertEqual(fsm.state, "SEARCH_BALL")
-
-    def test_recovery_advances_through_safe_waypoints(self):
-        agent = FakeAgent()
-        fsm = DeciderFSM(agent)
-        fsm.state = "SIDE_RECOVERY"
-        agent.ball_w = np.array([1.0, -2.9])
-        geometry = fsm._side_recovery_geometry(agent.ball_w)
-
-        fsm._side_recovery_phase = "BYPASS_INFIELD"
-        agent.robot_w = geometry["bypass_target"].copy()
-        fsm._do_side_recovery()
-        self.assertEqual(fsm._side_recovery_phase, "CROSS_OUTSIDE")
-
-        agent.robot_w = geometry["cross_target"].copy()
-        fsm._do_side_recovery()
-        self.assertEqual(fsm._side_recovery_phase, "STAGE_OUTSIDE")
-
-        agent.robot_w = geometry["staging_target"].copy()
-        fsm._do_side_recovery()
-        self.assertEqual(fsm._side_recovery_phase, "BRAKE_FACE_IN")
-
-        fsm._do_side_recovery()
-        self.assertEqual(fsm._side_recovery_phase, "FACE_IN")
-
-        recovery_yaw = math.degrees(math.atan2(
-            geometry["recovery_dir"][1],
-            geometry["recovery_dir"][0],
-        ))
-        agent.robot_yaw_deg = recovery_yaw
-        fsm._do_side_recovery()
-        self.assertEqual(fsm._side_recovery_phase, "PUSH")
-
-        cmd = fsm._do_side_recovery()
-        self.assertGreater(cmd[0], 0.0)
-        self.assertGreater(fsm._side_recovery_push_vx, 0.20)
-
-    def test_return_field_transition_stops_before_new_phase(self):
-        agent = FakeAgent()
-        fsm = DeciderFSM(agent)
-        fsm.state = "SIDE_RECOVERY"
-        fsm._side_recovery_phase = "RETURN_FIELD"
-        agent.robot_w = np.array([0.0, 2.9])
-        agent.ball_w = np.array([1.0, 2.9])
-        fsm.cmd_filter.last_cmd = (0.5, 0.0, 0.0)
-
-        cmd = fsm._do_side_recovery()
-
-        self.assertEqual(fsm._side_recovery_phase, "BYPASS_INFIELD")
-        self.assertGreater(cmd[0], 0.0)
-        self.assertLess(cmd[0], 0.5)
-
-    def test_unknown_phase_resets_without_pushing(self):
-        agent = FakeAgent()
-        fsm = DeciderFSM(agent)
-        fsm.state = "SIDE_RECOVERY"
-        fsm._side_recovery_phase = "UNKNOWN"
-        agent.robot_w = np.array([0.0, 2.4])
-        agent.ball_w = np.array([1.0, 2.9])
-
-        cmd = fsm._do_side_recovery()
-
-        self.assertIn(
-            fsm._side_recovery_phase,
-            ("RETREAT_INFIELD", "BYPASS_INFIELD"),
-        )
-        self.assertEqual(cmd, (0.0, 0.0, 0.0))
-
-    def test_face_push_uses_heading_hysteresis(self):
-        agent = FakeAgent()
-        fsm = DeciderFSM(agent)
-        fsm.state = "SIDE_RECOVERY"
-        agent.robot_w = np.array([0.8, 3.1])
-        agent.ball_w = np.array([1.0, 2.9])
-        geometry = fsm._side_recovery_geometry(agent.ball_w)
-        recovery_yaw = math.atan2(
-            geometry["recovery_dir"][1],
-            geometry["recovery_dir"][0],
-        )
-
-        agent.robot_yaw_deg = math.degrees(recovery_yaw + math.radians(15))
-        fsm._side_recovery_phase = "FACE_IN"
-        fsm._do_side_recovery()
-        self.assertEqual(fsm._side_recovery_phase, "FACE_IN")
-
-        fsm._side_recovery_phase = "PUSH"
-        fsm._do_side_recovery()
-        self.assertEqual(fsm._side_recovery_phase, "PUSH")
-
-    def test_recovery_waypoint_segments_clear_the_ball(self):
-        agent = FakeAgent()
-        fsm = DeciderFSM(agent)
-        ball = np.array([1.0, 2.9])
-        geometry = fsm._side_recovery_geometry(ball)
-        segments = [
-            (geometry["bypass_target"], geometry["cross_target"]),
-            (geometry["cross_target"], geometry["staging_target"]),
-        ]
-        for start, end in segments:
-            with self.subTest(start=start, end=end):
-                distance, _ = agent.push_to_goal._point_to_segment_distance(
-                    ball, start, end
-                )
-                self.assertGreaterEqual(
-                    distance, agent.push_to_goal.orbit_clearance
-                )
 
 
 class DribbleTransitionTests(unittest.TestCase):
@@ -808,8 +598,26 @@ class CommandFilterTests(unittest.TestCase):
         )
         command_filter.last_cmd = (0.2, -0.1, 0.3)
         result = command_filter.apply_clip_only(2.0, -2.0, 2.0)
-        self.assertEqual(result, (0.9, -0.35, 1.5))
+        self.assertEqual(result, (0.0, -0.35, 1.5))
         self.assertEqual(command_filter.last_cmd, (0.2, -0.1, 0.3))
+
+    def test_forward_limit_decreases_continuously_with_yaw(self):
+        command_filter = CommandFilter(
+            {
+                "cmd_filter": {
+                    "vx_max": 0.8,
+                    "w_max": 1.5,
+                    "yaw_full_speed": 0.25,
+                    "yaw_zero_speed": 1.5,
+                }
+            }
+        )
+        low_turn = command_filter.apply_clip_only(0.8, 0.0, 0.25)
+        medium_turn = command_filter.apply_clip_only(0.8, 0.0, 0.875)
+        hard_turn = command_filter.apply_clip_only(0.8, 0.0, 1.5)
+        self.assertEqual(low_turn[0], 0.8)
+        self.assertAlmostEqual(medium_turn[0], 0.4)
+        self.assertEqual(hard_turn[0], 0.0)
 
     def test_turn_only_clears_translation_and_filters_rotation(self):
         command_filter = CommandFilter(
@@ -864,6 +672,541 @@ class CommandFilterTests(unittest.TestCase):
         )
         result = command_filter.apply_clip_only(-0.5, 0.0, 0.0)
         self.assertEqual(result[0], 0.0)
+
+
+class DirectChaseTests(unittest.TestCase):
+    def setUp(self):
+        self.agent = FakeAgent()
+        self.ctrl = DirectChaseController()
+
+    # --- Game state gating ---
+
+    def test_only_moves_in_state_playing(self):
+        for gc_state, expect_zero in [
+            ("STATE_INITIAL", True),
+            ("STATE_READY", True),
+            ("STATE_SET", True),
+            ("STATE_FINISHED", True),
+            ("STATE_STANDBY", True),
+            ("STATE_PLAYING", False),
+        ]:
+            with self.subTest(gc_state=gc_state):
+                self.agent.gamecontroller.game_state = gc_state
+                self.agent.current_cmd = [0.5, 0.0, 0.0]  # non-zero before
+                self.ctrl.reset()
+                self.ctrl.tick(self.agent)
+                if expect_zero:
+                    self.assertEqual(self.agent.current_cmd, [0.0, 0.0, 0.0])
+                else:
+                    self.assertNotEqual(self.agent.current_cmd, [0.0, 0.0, 0.0])
+
+    def test_non_playing_resets_filter(self):
+        self.agent.gamecontroller.game_state = "STATE_PLAYING"
+        self.agent.ball_w = np.array([2.0, 0.0])
+        self.ctrl.tick(self.agent)
+        self.assertGreater(self.ctrl._last_vx, 0.0)
+
+        self.agent.gamecontroller.game_state = "STATE_FINISHED"
+        self.ctrl.tick(self.agent)
+        self.assertEqual(self.ctrl._last_vx, 0.0)
+        self.assertEqual(self.agent.current_cmd, [0.0, 0.0, 0.0])
+
+    # --- Stop distance ---
+
+    def test_stops_immediately_within_stop_distance(self):
+        self.agent.gamecontroller.game_state = "STATE_PLAYING"
+        self.ctrl._last_vx = 0.5  # residual speed
+        self.agent.ball_local_override = [0.30, 0.0]  # <= 0.35
+        self.ctrl.tick(self.agent)
+        self.assertEqual(self.agent.current_cmd, [0.0, 0.0, 0.0])
+        self.assertEqual(self.ctrl._last_vx, 0.0)
+
+    def test_moves_when_beyond_stop_distance(self):
+        self.agent.gamecontroller.game_state = "STATE_PLAYING"
+        self.agent.ball_local_override = [1.0, 0.0]
+        self.ctrl.tick(self.agent)
+        self.assertGreater(self.agent.current_cmd[0], 0.0)
+
+    # --- Ball loss ---
+
+    def test_ball_loss_no_crash(self):
+        self.agent.gamecontroller.game_state = "STATE_PLAYING"
+        self.agent.ball_visible = False
+        self.ctrl.tick(self.agent)
+        self.assertAlmostEqual(self.agent.current_cmd[0], 0.0)
+        self.assertNotEqual(self.agent.current_cmd[2], 0.0)
+
+    def test_position_invalid_fallback_search_direction(self):
+        self.agent.gamecontroller.game_state = "STATE_PLAYING"
+        self.agent.ball_visible = False
+        self.agent.robot_w = np.array([0.0, None])
+        self.ctrl.tick(self.agent)
+        self.assertGreater(self.agent.current_cmd[2], 0.0)
+
+    # --- Agent isolation ---
+
+    def test_no_shared_state_between_agents(self):
+        agent_a = FakeAgent()
+        agent_b = FakeAgent()
+        ctrl_a = DirectChaseController()
+        ctrl_b = DirectChaseController()
+        agent_a.gamecontroller.game_state = "STATE_PLAYING"
+        agent_b.gamecontroller.game_state = "STATE_PLAYING"
+        agent_a.ball_w = np.array([1.0, 0.0])
+        agent_b.ball_w = np.array([3.0, 0.0])
+
+        # After different numbers of ticks, filter states should differ
+        for _ in range(5):
+            ctrl_a.tick(agent_a)
+        ctrl_b.tick(agent_b)
+        # Agent A has accumulated more filter history — its _last_vx should differ
+        self.assertNotEqual(
+            ctrl_a._last_vx, ctrl_b._last_vx,
+            "Separate controllers must not share filter state",
+        )
+
+    # --- Forward-yaw envelope ---
+
+    def test_turn_envelope_reduces_vx(self):
+        cfg = DirectChaseConfig(
+            stop_distance=0.35, vx_gain=1.0, vx_max=1.0,
+            w_gain=10.0, w_max=1.2,
+        )
+        ctrl = DirectChaseController(cfg)
+        agent = FakeAgent()
+        agent.gamecontroller.game_state = "STATE_PLAYING"
+        # Ball at 45° — large heading → large w, should trigger envelope
+        agent.ball_local_override = [1.0, 1.0]
+        ctrl.tick(agent)
+        # With the envelope active at high |w|, vx should be reduced
+        # below the raw gain * distance
+        self.assertLess(agent.current_cmd[0], 1.0)
+        self.assertGreater(abs(agent.current_cmd[2]), 0.0)
+
+    def test_forward_speed_limit_allows_zero_vx(self):
+        """At large |w|, forward speed is allowed to reach zero."""
+        vx = forward_speed_limit(1.0, 1.5, yaw_full_speed=0.25,
+                                 yaw_zero_speed=1.5, vx_max=1.0)
+        self.assertEqual(vx, 0.0)
+
+    def test_config_uses_command_filter_envelope_thresholds(self):
+        self.agent._config["cmd_filter"]["yaw_full_speed"] = 0.10
+        self.agent._config["cmd_filter"]["yaw_zero_speed"] = 0.80
+
+        cfg = DirectChaseConfig.from_agent(self.agent)
+        cfg.vx_gain = 2.0
+        cfg.w_gain = 1.0
+        cfg.w_max = 1.0
+        cfg.vx_accel = 2.0
+        cfg.w_accel = 2.0
+        cfg.smooth_alpha = 1.0
+        ctrl = DirectChaseController(cfg)
+        self.agent.gamecontroller.game_state = "STATE_PLAYING"
+        self.agent.ball_local_override = [
+            2.0 * math.cos(0.45),
+            2.0 * math.sin(0.45),
+        ]
+        ctrl.tick(self.agent)
+
+        self.assertEqual(cfg.yaw_full_speed, 0.10)
+        self.assertEqual(cfg.yaw_zero_speed, 0.80)
+        self.assertAlmostEqual(self.agent.current_cmd[0], 0.5)
+        self.assertAlmostEqual(self.agent.current_cmd[2], 0.45)
+
+    # --- Search rotation ---
+
+    def test_search_rotation_direction(self):
+        # Use separate controllers to avoid filter state bleed between subtests
+        for y_pos, expected_sign in [(1.0, -1.0), (-1.0, 1.0)]:
+            with self.subTest(y_pos=y_pos):
+                ctrl = DirectChaseController()
+                agent = FakeAgent()
+                agent.gamecontroller.game_state = "STATE_PLAYING"
+                agent.ball_visible = False
+                agent.robot_w = np.array([0.0, y_pos])
+                ctrl.tick(agent)
+                if expected_sign > 0:
+                    self.assertGreater(agent.current_cmd[2], 0.0)
+                else:
+                    self.assertLess(agent.current_cmd[2], 0.0)
+
+    # --- Acceleration ---
+
+    def test_straight_acceleration_limited(self):
+        self.agent.gamecontroller.game_state = "STATE_PLAYING"
+        self.agent.ball_local_override = [3.0, 0.0]  # far away
+        ctrl = DirectChaseController(DirectChaseConfig(
+            vx_accel=0.08, smooth_alpha=1.0,  # alpha=1 → no extra smoothing
+        ))
+        ctrl.tick(self.agent)
+        first_vx = self.agent.current_cmd[0]
+        self.assertGreater(first_vx, 0.0)
+        self.assertLessEqual(first_vx, 0.08)  # first step limited by accel
+
+    # --- CLI and strategy routing ---
+
+    def test_real_parser_exposes_strategy_choices(self):
+        module = _load_decider_module()
+        parser = module.build_arg_parser()
+
+        self.assertEqual(parser.parse_args([]).sim_strategy, "push_to_goal")
+        self.assertEqual(
+            parser.parse_args(["--sim-strategy", "direct_chase"]).sim_strategy,
+            "direct_chase",
+        )
+
+    def test_game_creates_and_reuses_direct_chase_controller(self):
+        self.agent._sim_strategy = "direct_chase"
+
+        game(self.agent)
+        first = self.agent._direct_chase_controller
+        game(self.agent)
+
+        self.assertIs(self.agent._direct_chase_controller, first)
+        self.assertFalse(hasattr(self.agent, "_decider_fsm"))
+
+class ContinuousPushToGoalTests(unittest.TestCase):
+    """Tests for the continuous PushToGoal ball-chasing controller."""
+
+    def setUp(self):
+        self.agent = FakeAgent()
+        self.agent._config["push_to_goal"] = {
+            "behind_offset": 0.12,
+            "far_distance": 0.60,
+            "push_vx_min": 0.35,
+            "vx_gain": 2.5,
+            "vx_max": 1.0,
+            "vy_gain": 2.5,
+            "vy_max": 0.20,
+            "w_gain": 2.5,
+            "w_max": 0.45,
+            "turn_only_yaw_deg": 60.0,
+            "search_w": 0.6,
+        }
+        self.cfg = PushToGoalConfig.from_config(self.agent._config)
+        self.ctrl = ContinuousPushToGoal(self.cfg)
+
+    # --- Parser ---
+
+    def test_real_parser_default_is_push_to_goal(self):
+        module = _load_decider_module()
+        parser = module.build_arg_parser()
+        self.assertEqual(
+            parser.parse_args([]).sim_strategy, "push_to_goal"
+        )
+
+    def test_real_parser_rejects_fsm(self):
+        module = _load_decider_module()
+        parser = module.build_arg_parser()
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["--sim-strategy", "fsm"])
+
+    def test_real_parser_accepts_direct_chase(self):
+        module = _load_decider_module()
+        parser = module.build_arg_parser()
+        self.assertEqual(
+            parser.parse_args(["--sim-strategy", "direct_chase"]).sim_strategy,
+            "direct_chase",
+        )
+
+    # --- game() dispatch ---
+
+    def test_game_creates_and_reuses_push_to_goal_controller(self):
+        self.agent._sim_strategy = "push_to_goal"
+
+        game(self.agent)
+        first = self.agent._push_to_goal_controller
+        game(self.agent)
+
+        self.assertIs(self.agent._push_to_goal_controller, first)
+
+    def test_game_does_not_create_decider_fsm_for_push_to_goal(self):
+        self.agent._sim_strategy = "push_to_goal"
+        game(self.agent)
+        self.assertFalse(hasattr(self.agent, "_decider_fsm"))
+
+    def test_game_rejects_unknown_strategy(self):
+        self.agent._sim_strategy = "bogus"
+        with self.assertRaisesRegex(ValueError, "Unsupported simulation strategy"):
+            game(self.agent)
+
+    # --- State gating ---
+
+    def test_stops_when_not_state_playing(self):
+        for state in (
+            "STATE_INITIAL", "STATE_READY", "STATE_SET",
+            "STATE_FINISHED", "STATE_STANDBY",
+        ):
+            with self.subTest(state=state):
+                self.agent.gamecontroller.game_state = state
+                self.agent.robot_w = np.array([0.0, 0.0])
+                self.agent.ball_w = np.array([3.0, 0.0])
+                self.agent.ball_visible = True
+                self.ctrl.tick(self.agent)
+                self.assertEqual(
+                    self.agent.current_cmd, [0.0, 0.0, 0.0],
+                    f"Expected zero command in {state}",
+                )
+
+    def test_stops_when_position_unknown(self):
+        # get_self_pos returns None → zero commands
+        saved = self.agent.get_self_pos
+        try:
+            self.agent.get_self_pos = lambda: None
+            self.ctrl.tick(self.agent)
+            self.assertEqual(self.agent.current_cmd, [0.0, 0.0, 0.0])
+        finally:
+            self.agent.get_self_pos = saved
+
+    # --- Ball loss ---
+
+    def test_ball_loss_search_rotation(self):
+        self.agent.ball_visible = False
+        self.agent.robot_w = np.array([0.0, 0.0])
+        self.ctrl.tick(self.agent)
+        vx, vy, w = self.agent.current_cmd
+        self.assertEqual(vx, 0.0)
+        self.assertEqual(vy, 0.0)
+        self.assertNotEqual(w, 0.0, "Expected search rotation")
+
+    def test_ball_loss_default_search_direction_positive(self):
+        self.agent.ball_visible = False
+        self.agent.robot_w = np.array([0.0, 0.0])
+        # _last_ball_side defaults to 0 → positive direction
+        self.ctrl._last_ball_side = 0.0
+        self.ctrl.tick(self.agent)
+        self.assertGreater(self.agent.current_cmd[2], 0.0)
+
+    def test_ball_loss_remembers_last_lateral_side_left(self):
+        # Ball on left side → search left on loss
+        self.agent.robot_w = np.array([0.0, 0.0])
+        self.agent.ball_w = np.array([1.0, 0.5])  # ball to the left
+        self.agent.robot_yaw_deg = 0.0
+        self.agent.ball_visible = True
+        self.ctrl.tick(self.agent)  # records _last_ball_side > 0
+
+        self.assertGreater(self.ctrl._last_ball_side, 0.0)
+
+        # Now lose ball
+        self.agent.ball_visible = False
+        self.ctrl.tick(self.agent)
+        self.assertGreater(self.agent.current_cmd[2], 0.0,
+                           "Expected positive search rotation after ball on left")
+
+    def test_ball_loss_remembers_last_lateral_side_right(self):
+        # Ball on right side → search right on loss
+        self.agent.robot_w = np.array([0.0, 0.0])
+        self.agent.ball_w = np.array([1.0, -0.5])  # ball to the right
+        self.agent.robot_yaw_deg = 0.0
+        self.agent.ball_visible = True
+        self.ctrl.tick(self.agent)  # records _last_ball_side < 0
+
+        self.assertLess(self.ctrl._last_ball_side, 0.0)
+
+        # Now lose ball
+        self.agent.ball_visible = False
+        self.ctrl.tick(self.agent)
+        self.assertLess(self.agent.current_cmd[2], 0.0,
+                        "Expected negative search rotation after ball on right")
+
+    # --- Motion: far ball ---
+
+    def test_far_ball_straight_ahead_outputs_high_vx(self):
+        self.agent.robot_w = np.array([0.0, 0.0])
+        self.agent.ball_w = np.array([3.0, 0.0])  # 3m ahead
+        self.agent.robot_yaw_deg = 0.0
+        self.agent.ball_visible = True
+        self.ctrl.tick(self.agent)
+
+        vx, vy, w = self.agent.current_cmd
+        # Ball is at (3,0), target behind ball at ~(2.88, 0)
+        # target_distance ≈ 2.88, heading_error ≈ 0 → cos ≈ 1
+        # vx = clip(2.5 * 2.88 * 1.0, 0, 1.0) = 1.0
+        self.assertGreater(vx, 0.5, f"Expected high vx from far ball, got {vx}")
+
+    # --- Motion: lateral ball ---
+
+    def test_lateral_ball_strafes_and_turns_toward_ball(self):
+        self.agent.robot_w = np.array([0.0, 0.0])
+        # Ball 2m ahead, 1m left → behind-ball target also offset left
+        self.agent.ball_w = np.array([2.0, 1.0])
+        self.agent.robot_yaw_deg = 0.0
+        self.agent.ball_visible = True
+        self.ctrl.tick(self.agent)
+
+        vx, vy, w = self.agent.current_cmd
+        # Far from the ball, both lateral motion and yaw point toward it.
+        self.assertGreater(vy, 0.0, f"Expected vy > 0 for left-side ball, got {vy}")
+        self.assertGreater(w, 0.0, f"Expected w > 0 for left-side ball, got {w}")
+        self.assertGreater(vx, 0.0, f"Expected vx > 0, got {vx}")
+
+    # --- Motion: near ball (continuous push) ---
+
+    def test_near_ball_does_not_stop(self):
+        """Ball within 0.2m directly ahead still produces a push command."""
+        self.agent.robot_w = np.array([0.0, 0.0])
+        self.agent.ball_w = np.array([0.2, 0.0])  # very close
+        self.agent.robot_yaw_deg = 0.0
+        self.agent.ball_visible = True
+        self.ctrl.tick(self.agent)
+
+        vx, vy, w = self.agent.current_cmd
+        self.assertGreater(vx, 0.0)
+
+    def test_at_behind_target_keeps_push_speed(self):
+        """Reaching the behind-ball point must not stop continuous pushing."""
+        self.agent.robot_w = np.array([0.0, 0.0])
+        # Ball at (0.12, 0) → behind-ball target at (0, 0) = robot position
+        self.agent.ball_w = np.array([0.12, 0.0])
+        self.agent.robot_yaw_deg = 0.0
+        self.agent.ball_visible = True
+        self.ctrl.tick(self.agent)
+
+        vx = self.agent.current_cmd[0]
+        self.assertGreaterEqual(vx, self.cfg.push_vx_min)
+
+    def test_near_ball_from_side_targets_behind_point_before_goal(self):
+        """A side approach turns toward the behind-ball target first."""
+        self.agent.robot_w = np.array([0.0, 0.4])
+        self.agent.ball_w = np.array([0.0, 0.0])
+        self.agent.robot_yaw_deg = 0.0
+        self.agent.ball_visible = True
+        self.ctrl.tick(self.agent)
+
+        vx, vy, w = self.agent.current_cmd
+        self.assertEqual(vx, 0.0)
+        self.assertEqual(vy, 0.0)
+        self.assertLess(w, 0.0)
+
+    def test_target_behind_robot_uses_turn_only_command(self):
+        """Large heading error does not combine saturated strafe and turn."""
+        self.agent.robot_w = np.array([1.0, 0.0])
+        self.agent.ball_w = np.array([0.2, 0.3])
+        self.agent.robot_yaw_deg = 0.0
+        self.agent.ball_visible = True
+        self.ctrl.tick(self.agent)
+
+        vx, vy, w = self.agent.current_cmd
+        self.assertEqual(vx, 0.0)
+        self.assertEqual(vy, 0.0)
+        self.assertNotEqual(w, 0.0)
+
+    # --- Goal direction ---
+
+    def test_red_goal_is_positive_x(self):
+        self.agent.color = "red"
+        self.agent.robot_w = np.array([0.0, 0.0])
+        self.agent.ball_w = np.array([2.0, 0.0])
+        self.agent.robot_yaw_deg = 0.0
+        self.agent.ball_visible = True
+        self.ctrl.tick(self.agent)
+
+        # Red team: goal at +field_length/2 = +4.5 (M league)
+        # Ball at (2, 0) → behind-ball target should be at (~1.88, 0)
+        # Robot at (0, 0) → delta ≈ (+1.88, 0) → travel_yaw ≈ 0 → w ≈ 0
+        self.assertAlmostEqual(self.agent.current_cmd[2], 0.0, delta=0.01)
+
+    def test_blue_goal_is_negative_x(self):
+        self.agent.color = "blue"
+        self.agent.robot_w = np.array([0.0, 0.0])
+        self.agent.ball_w = np.array([-2.0, 0.0])
+        self.agent.robot_yaw_deg = 0.0
+        self.agent.ball_visible = True
+        self.ctrl.tick(self.agent)
+
+        # Blue team: goal at -field_length/2 = -4.5
+        # Ball at (-2, 0) → behind-ball target = ball - unit(ball→goal) * 0.12
+        # ball→goal = (-4.5) - (-2) = -2.5 → unit = (-1, 0)
+        # target_w = (-2, 0) - (-1, 0) * 0.12 = (-1.88, 0)
+        # Robot at (0, 0) → delta = (-1.88, 0) → travel_yaw = π
+        # heading_error = π - 0 = π → w should be constrained by w_max
+        # Robot is behind the ball relative to its own goal → should turn around
+        self.assertLess(self.agent.current_cmd[2], 0.0,
+                        f"Blue team should turn toward negative goal, got w={self.agent.current_cmd[2]}")
+
+    def test_red_team_ball_beyond_goal_stops(self):
+        self.agent.color = "red"
+        self.agent.robot_w = np.array([5.0, 0.0])
+        self.agent.ball_w = np.array([5.2, 0.0])  # past goal at +4.5
+        self.agent.robot_yaw_deg = 0.0
+        self.agent.ball_visible = True
+        self.ctrl.tick(self.agent)
+
+        self.assertEqual(self.agent.current_cmd, [0.0, 0.0, 0.0])
+
+    def test_blue_team_ball_beyond_goal_stops(self):
+        self.agent.color = "blue"
+        self.agent.robot_w = np.array([-5.0, 0.0])
+        self.agent.ball_w = np.array([-5.2, 0.0])
+        self.agent.robot_yaw_deg = 180.0
+        self.agent.ball_visible = True
+        self.ctrl.tick(self.agent)
+        self.assertEqual(self.agent.current_cmd, [0.0, 0.0, 0.0])
+
+    # --- Behind offset ---
+
+    def test_behind_offset_creates_target_behind_ball(self):
+        """The target point should be behind the ball relative to goal."""
+        self.agent.color = "red"
+        self.agent.robot_w = np.array([0.0, 0.0])
+        self.agent.ball_w = np.array([2.0, 0.0])
+        self.agent.robot_yaw_deg = 0.0
+        self.agent.ball_visible = True
+        self.ctrl.tick(self.agent)
+
+        # Ball at (2, 0), goal at (4.5, 0)
+        # to_goal = (2.5, 0) → unit = (1, 0)
+        # target_w = (2, 0) - (1, 0)*0.12 = (1.88, 0)
+        # Robot at (0, 0) → delta = (1.88, 0)
+        # heading_error should be ~0 (target is straight ahead)
+        vx, vy, w = self.agent.current_cmd
+        self.assertAlmostEqual(w, 0.0, delta=0.01,
+                               msg="Behind-ball target should be straight ahead")
+        self.assertGreater(vx, 0.0, "Should move toward behind-ball target")
+
+    # --- Field size from config ---
+
+    def test_active_field_size_has_priority_in_controller(self):
+        self.agent._config["active_field_size"] = [9.0, 6.0]
+        self.agent._config["field_size"]["M"] = [14.0, 9.0]
+        self.agent.robot_w = np.array([4.4, 0.0])
+        self.agent.ball_w = np.array([4.6, 0.0])
+        self.agent.robot_yaw_deg = 0.0
+        self.agent.ball_visible = True
+        self.ctrl.tick(self.agent)
+        self.assertEqual(self.ctrl._field_length, 9.0)
+        self.assertEqual(self.agent.current_cmd, [0.0, 0.0, 0.0])
+
+    def test_far_distance_changes_approach_target(self):
+        self.agent.robot_w = np.array([0.0, 0.0])
+        self.agent.ball_w = np.array([0.4, 0.2])
+        self.agent.robot_yaw_deg = 0.0
+        self.agent.ball_visible = True
+
+        far_ctrl = ContinuousPushToGoal(PushToGoalConfig(far_distance=0.30))
+        far_ctrl.tick(self.agent)
+        far_cmd = tuple(self.agent.current_cmd)
+
+        near_ctrl = ContinuousPushToGoal(PushToGoalConfig(far_distance=1.00))
+        near_ctrl.tick(self.agent)
+        near_cmd = tuple(self.agent.current_cmd)
+
+        self.assertNotEqual(far_cmd, near_cmd)
+
+    # --- Config round-trip ---
+
+    def test_push_to_goal_config_from_config(self):
+        cfg = PushToGoalConfig.from_config(self.agent._config)
+        self.assertEqual(cfg.behind_offset, 0.12)
+        self.assertEqual(cfg.push_vx_min, 0.35)
+        self.assertEqual(cfg.vx_gain, 2.5)
+        self.assertEqual(cfg.w_max, 0.45)
+        self.assertEqual(cfg.search_w, 0.6)
+
+    def test_controller_default_config(self):
+        ctrl = ContinuousPushToGoal()
+        self.assertEqual(ctrl.cfg.behind_offset, 0.12)
+        self.assertEqual(ctrl.cfg.vx_max, 1.0)
 
 
 if __name__ == "__main__":

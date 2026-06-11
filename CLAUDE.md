@@ -134,10 +134,13 @@ Available K1 environment names: `k1-flat-terrain-walk` (47→12 leg locomotion),
 ### K1 Walk Training (via shell wrapper)
 ```bash
 cd MotrixLab
-bash scripts/train_k1_robust_walk.sh              # RSLRL, 4096 envs, resume from model_1350
+bash scripts/train_k1_robust_walk.sh              # RSLRL, 4096 envs, resume from model_1350 (baseline)
+bash scripts/train_k1_turn_robust.sh              # RSLRL, 4096 envs, resume from latest, sustained-turn + agility + sprint-turn
 bash scripts/train_k1_getup.sh                    # RSLRL, 2048 envs, train getup from scratch
 ```
 See `docs/K1_DUAL_MACHINE_TRAINING.md` for dual-machine setup and `docs/K1_ROBUST_WALK_TRAINING.md` for walk-specific details.
+
+**K1 walk training enhancements (2026-06-11):** The `train_k1_turn_robust.sh` script includes four new command modes beyond basic walking — mixed_turn (sustained low-speed turning ≤12s), direction_change (yaw sign flip every 1.5s), sprint_turn (high-speed + high-yaw simultaneously), and stronger domain randomization (push 0.7, noise 1.2). Speed range extends to vx∈[0,1.0], w∈[-1.5,1.5]. These modes train the policy to handle the prolonged high-yaw turns required by soccer navigation (ESCAPE_FACE, orbit, side recovery).
 
 ### K1 Model Export (REQUIRED for simulation)
 **RSLRL checkpoints CANNOT be used directly in the soccer simulation.** The checkpoint lacks the `EmpiricalNormalization` module that training baked into the model (`obs_normalization=True`). You must export to TorchScript first:
@@ -147,7 +150,8 @@ uv run python scripts/export_k1_rslrl_torchscript.py \
     runs/k1-flat-terrain-walk/rslrl/<run_dir>/model_NNN.pt \
     -o exported/model_NNN_torchscript.pt
 ```
-Then use the exported `.pt` in `start_sim.sh --policy`.
+Then use the exported `.pt` in `start_sim.sh --policy`. The default policy in `scripts/match_config.sh` is `MotrixLab/exported/model_650_sprint_turn_torchscript.pt` (47→12 with obs_normalizer baked in, trained with sustained-turn + agility + sprint-turn curriculum).
+
 The wrapper sets `CUDA_VISIBLE_DEVICES=0`, syncs RSLRL extras, and runs `train.py --env k1-flat-terrain-walk --rllib rslrl --num-envs 4096 --seed 1`.
 
 ### Playing / Evaluating Policies

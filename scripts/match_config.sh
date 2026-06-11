@@ -8,13 +8,13 @@
 # ============================================================================
 TEAM_SIZE="${TEAM_SIZE:-1}"
 REAL_TIME="--real-time"
-POLICY_ARG="--policy $REPO_ROOT/MotrixLab/exported/model_1200_turn_robust_torchscript.pt --k1-policy-flavor motrixlab"
+POLICY_ARG="--policy $REPO_ROOT/MotrixLab/exported/model_3600_fast_chase_torchscript.pt --k1-policy-flavor motrixlab"
 BLUE_POLICY_ARG=""
 COLOR="${COLOR:-red}"
 ROBOT_ID="${ROBOT_ID:-0}"
-FIXED_CMD="--sim-fixed-cmd 0.5,0,0"   # default: straight-line walk test
-REFEREE_ARG=""
-REFEREE_STATE_ARG=""
+FIXED_CMD=""   # default: full game (PushToGoal controller)
+REFEREE_ARG="--use-referee"
+REFEREE_STATE_ARG="--referee-state playing"
 DURATION="${DURATION:-60}"
 OUTPUT=""
 SIM_EXTRA=""       # extra flags passed to sim launcher (e.g. --record-video)
@@ -34,7 +34,7 @@ parse_args() {
             --blue-policy)     BLUE_POLICY_ARG="--blue-policy $2 --blue-policy-flavor legged_gym"; shift 2 ;;
             --color)           COLOR="$2"; shift 2 ;;
             --id)              ROBOT_ID="$2"; shift 2 ;;
-            --play)            FIXED_CMD="";
+            --play)            FIXED_CMD="";   # compatibility alias (play is the default now)
                                [[ -n "$REFEREE_ARG" ]] || REFEREE_ARG="--use-referee";
                                [[ -n "$REFEREE_STATE_ARG" ]] || REFEREE_STATE_ARG="--referee-state playing";
                                shift ;;
@@ -44,7 +44,7 @@ parse_args() {
             --referee-state)   REFEREE_STATE_ARG="--referee-state $2"; shift 2 ;;
             --policy-debug)    SIM_EXTRA="$SIM_EXTRA --policy-debug"; shift ;;
             --policy-debug-interval) SIM_EXTRA="$SIM_EXTRA --policy-debug-interval $2"; shift 2 ;;
-            --t)       TRAJECTORY_ENABLED=1; shift ;;
+            --t|--trajectory) TRAJECTORY_ENABLED=1; shift ;;
             --trajectory-dir)   TRAJECTORY_ENABLED=1; TRAJECTORY_DIR="$2"; shift 2 ;;
             --d)               DURATION="$2"; shift 2 ;;
             --output)          OUTPUT="$2"; shift 2 ;;
@@ -98,7 +98,7 @@ launch_decider() {
 
     echo "=== Starting Decider ==="
     echo "Color: $COLOR  ID: $ROBOT_ID"
-    echo "Cmd:   ${FIXED_CMD:-(game FSM)}"
+    echo "Cmd:   ${FIXED_CMD:-(PushToGoal controller)}"
     if [[ "$TRAJECTORY_ENABLED" -eq 1 ]]; then
         echo "Trajectory: ${TRAJECTORY_DIR:-(Decider default directory)}"
     fi

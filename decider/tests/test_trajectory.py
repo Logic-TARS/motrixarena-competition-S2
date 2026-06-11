@@ -83,6 +83,47 @@ class TrajectoryRecorderTests(unittest.TestCase):
         self.assertEqual(row["run_mode"], "fixed_command")
         self.assertNotIn("fsm_state", row)
 
+    def test_sim_agent_records_selected_direct_chase_mode(self):
+        module = _load_decider_module()
+        agent = module.SimAgent.__new__(module.SimAgent)
+
+        class CapturingRecorder:
+            def __init__(self):
+                self.rows = []
+
+            def write(self, row):
+                self.rows.append(row)
+
+        class GameController:
+            game_state = "STATE_PLAYING"
+
+        recorder = CapturingRecorder()
+        agent._trajectory_recorder = recorder
+        agent._trajectory_frame = 0
+        agent._trajectory_started_perf = time.perf_counter()
+        agent._trajectory_last_perf = None
+        agent._config = {"id": 0}
+        agent._active_field_length = 9.0
+        agent._active_field_width = 6.0
+        agent.sim_fixed_cmd = None
+        agent._sim_strategy = "direct_chase"
+        agent.color = "red"
+        agent.gamecontroller = GameController()
+        agent.get_self_pos = lambda: [0.0, 0.0]
+        agent.get_self_yaw = lambda: 0.0
+        agent.get_ball_pos_in_map = lambda: [2.0, 0.0]
+        agent.get_ball_pos = lambda: [2.0, 0.0]
+        agent.get_ball_distance = lambda: 2.0
+
+        response = {
+            "sim_timestamp": 123.0,
+            "state": {"ball": {"x": 2.0, "y": 0.0, "z": 0.09}},
+        }
+        agent._record_trajectory(response, [0.8, 0.0, 0.0])
+
+        self.assertEqual(recorder.rows[0]["run_mode"], "direct_chase")
+        self.assertNotIn("fsm_state", recorder.rows[0])
+
 
 class SnapshotTests(unittest.TestCase):
     def test_snapshot_is_serializable_and_has_no_side_effects(self):
@@ -130,17 +171,6 @@ class SnapshotTests(unittest.TestCase):
         snapshot = fsm.get_snapshot()
 
         self.assertEqual(snapshot["align_mode"], "ORBIT_SIDE")
-
-    def test_snapshot_exposes_side_recovery_phase(self):
-        agent = FakeAgent()
-        fsm = DeciderFSM(agent)
-        fsm.state = "SIDE_RECOVERY"
-        fsm._side_recovery_phase = "CROSS_OUTSIDE"
-
-        snapshot = fsm.get_snapshot()
-
-        self.assertEqual(snapshot["side_recovery_phase"], "CROSS_OUTSIDE")
-
 
 class TrajectoryAnalysisTests(unittest.TestCase):
     def _rows(self):
@@ -284,6 +314,100 @@ class TrajectoryAnalysisTests(unittest.TestCase):
         self.assertFalse(summary["fsm_enabled"])
         self.assertEqual(summary["kick_count"], 0)
 
+    def test_push_to_goal_summary_includes_new_metrics(self):
+        rows = [
+            {
+                "elapsed_s": "0.0",
+                "run_mode": "push_to_goal",
+                "team": "red",
+                "robot_x": "0.0",
+                "robot_y": "0.0",
+                "ball_x": "2.0",
+                "ball_y": "0.0",
+                "ball_distance": "2.0",
+                "cmd_vx": "1.0",
+                "cmd_vy": "0.0",
+                "cmd_w": "0.0",
+                "field_length": "9.0",
+                "field_width": "6.0",
+                "fsm_state": "",
+                "game_state": "STATE_PLAYING",
+            },
+            {
+                "elapsed_s": "0.5",
+                "run_mode": "push_to_goal",
+                "team": "red",
+                "robot_x": "0.5",
+                "robot_y": "0.0",
+                "ball_x": "2.5",
+                "ball_y": "0.0",
+                "ball_distance": "0.30",
+                "cmd_vx": "0.6",
+                "cmd_vy": "0.0",
+                "cmd_w": "0.0",
+                "field_length": "9.0",
+                "field_width": "6.0",
+                "fsm_state": "",
+                "game_state": "STATE_PLAYING",
+            },
+        ]
+        summary = build_summary(rows)
+        self.assertEqual(summary["run_mode"], "push_to_goal")
+        self.assertFalse(summary["fsm_enabled"])
+
+        ptg = summary.get("push_to_goal", {})
+        self.assertIsNotNone(ptg)
+        self.assertAlmostEqual(ptg["ball_dist_initial"], 2.0)
+        self.assertAlmostEqual(ptg["ball_dist_min"], 0.30)
+        self.assertAlmostEqual(ptg["ball_dist_final"], 0.30)
+        self.assertAlmostEqual(ptg["time_to_enter_0_5m"], 0.5)
+        self.assertAlmostEqual(ptg["robot_displacement"], 0.5)
+        self.assertAlmostEqual(ptg["goal_direction_ball_progress"], 0.5)
+
+        cmd_stats = ptg["cmd_statistics"]
+        self.assertAlmostEqual(cmd_stats["vx_mean"], 0.8)
+        self.assertAlmostEqual(ptg["near_ball_vx_mean"], 0.6)
+        self.assertIsNone(ptg["time_to_cross_goal_line"])
+
+    def test_blue_push_to_goal_progress_is_positive_toward_negative_x(self):
+        rows = [
+            {
+                "elapsed_s": "0.0",
+                "run_mode": "push_to_goal",
+                "team": "blue",
+                "robot_x": "0.0",
+                "robot_y": "0.0",
+                "ball_x": "-1.0",
+                "ball_y": "0.0",
+                "ball_distance": "1.0",
+                "cmd_vx": "0.8",
+                "cmd_vy": "-0.2",
+                "cmd_w": "-0.4",
+                "field_length": "9.0",
+                "fsm_state": "",
+            },
+            {
+                "elapsed_s": "1.0",
+                "run_mode": "push_to_goal",
+                "team": "blue",
+                "robot_x": "-0.5",
+                "robot_y": "0.0",
+                "ball_x": "-4.6",
+                "ball_y": "0.0",
+                "ball_distance": "0.4",
+                "cmd_vx": "0.4",
+                "cmd_vy": "0.1",
+                "cmd_w": "0.2",
+                "field_length": "9.0",
+                "fsm_state": "",
+            },
+        ]
+        ptg = build_summary(rows)["push_to_goal"]
+        self.assertGreater(ptg["goal_direction_ball_progress"], 0.0)
+        self.assertEqual(ptg["time_to_cross_goal_line"], 1.0)
+        self.assertEqual(ptg["cmd_statistics"]["vy_abs_max"], 0.2)
+        self.assertEqual(ptg["cmd_statistics"]["w_abs_max"], 0.4)
+
     def test_analyzer_writes_summary_and_plots(self):
         with tempfile.TemporaryDirectory() as tmp:
             output_dir = Path(tmp)
@@ -303,6 +427,49 @@ class TrajectoryAnalysisTests(unittest.TestCase):
 
 
 class ShellInterfaceTests(unittest.TestCase):
+    def test_match_config_defaults_to_playing_push_to_goal(self):
+        command = """
+set -u
+REPO_ROOT=/tmp/repo
+source scripts/match_config.sh
+printf '%s\\n%s\\n%s\\n' "$REFEREE_ARG" "$REFEREE_STATE_ARG" "$FIXED_CMD"
+"""
+        result = subprocess.run(
+            ["bash", "-c", command],
+            cwd=DECIDER_DIR.parent,
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(
+            result.stdout.splitlines(),
+            ["--use-referee", "--referee-state playing", ""],
+        )
+
+    def test_fixed_command_preserves_playing_defaults(self):
+        command = """
+set -u
+REPO_ROOT=/tmp/repo
+source scripts/match_config.sh
+parse_args --sim-fixed-cmd 0.5,0,0
+printf '%s\\n%s\\n%s\\n' "$REFEREE_ARG" "$REFEREE_STATE_ARG" "$FIXED_CMD"
+"""
+        result = subprocess.run(
+            ["bash", "-c", command],
+            cwd=DECIDER_DIR.parent,
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                "--use-referee",
+                "--referee-state playing",
+                "--sim-fixed-cmd 0.5,0,0",
+            ],
+        )
+
     def test_match_config_parses_trajectory_directory(self):
         command = """
 set -u
@@ -322,6 +489,23 @@ printf '%s\\n%s\\n%s\\n' "$TRAJECTORY_ENABLED" "$TRAJECTORY_DIR" "$FIXED_CMD"
             result.stdout.splitlines(),
             ["1", "/tmp/trajectory path", ""],
         )
+
+    def test_match_config_accepts_trajectory_long_flag(self):
+        command = """
+set -u
+REPO_ROOT=/tmp/repo
+source scripts/match_config.sh
+parse_args --trajectory
+printf '%s\\n' "$TRAJECTORY_ENABLED"
+"""
+        result = subprocess.run(
+            ["bash", "-c", command],
+            cwd=DECIDER_DIR.parent,
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.stdout.strip(), "1")
 
 
 if __name__ == "__main__":

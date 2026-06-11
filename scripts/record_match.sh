@@ -1,10 +1,10 @@
 #!/bin/bash
 # One-click: record a match and produce a video.
-# Default: straight-line walk test.  Edit match_config.sh to change defaults.
-# Usage: ./scripts/record_match.sh                  # walk test, 20 s
-#        ./scripts/record_match.sh --play           # full game (DeciderFSM)
+# Default: continuous PushToGoal in STATE_PLAYING.
+# Usage: ./scripts/record_match.sh                  # PushToGoal, 60 s
+#        ./scripts/record_match.sh --play           # compatibility alias
 #        ./scripts/record_match.sh --d 30 --output /tmp/my_match.mp4
-#        ./scripts/record_match.sh --play --trajectory --d 30
+#        ./scripts/record_match.sh --trajectory --d 30
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

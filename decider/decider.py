@@ -6,6 +6,7 @@
 #   @description : The entry py file for decision-making on clients
 #
 
+import argparse
 import sys, os, math, signal, time, traceback, json, logging
 import numpy as np
 from pathlib    import Path
@@ -57,6 +58,38 @@ def _active_field_size_from_match_config(match_config):
     if field_length <= 0.0 or field_width <= 0.0:
         raise ValueError("field dimensions must be positive")
     return [field_length, field_width]
+
+
+def build_arg_parser():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--simulation", action="store_true", help="Run in Sim Mode (ZMQ, No ROS)")
+    parser.add_argument("--ip", default="127.0.0.1", help="Sim IP")
+    parser.add_argument("--port", default="5555", help="Sim Port")
+    parser.add_argument("--id", type=int, default=None, help="Robot ID (overrides config)")
+    parser.add_argument("--color", type=str, default=None, choices=["red", "blue"], help="Team color (red/blue). If set, --id is interpreted as player number within team.")
+    parser.add_argument("--sim-hz", dest="sim_hz", type=float, default=None, help="Simulation control frequency in Hz (<=0 for unlimited)")
+    parser.add_argument(
+        "--sim-fixed-cmd",
+        default=None,
+        help="Debug only: send fixed normalized final command vx,vy,w to the simulator, bypassing user_entry logic.",
+    )
+    parser.add_argument(
+        "--record-trajectory",
+        action="store_true",
+        help="Record robot, ball, command, and FSM diagnostics in simulation mode.",
+    )
+    parser.add_argument(
+        "--trajectory-dir",
+        default=None,
+        help="Trajectory output directory. Supplying it also enables recording.",
+    )
+    parser.add_argument(
+        "--sim-strategy",
+        choices=["push_to_goal", "direct_chase"],
+        default="push_to_goal",
+        help="Simulation strategy: 'push_to_goal' for continuous ball chase (default), 'direct_chase' for diagnostic chase.",
+    )
+    return parser
 
 
 class Agent(Node):
@@ -174,6 +207,14 @@ class Agent(Node):
     def get_self_yaw(self) -> float:
         """Return self orientation angle."""
         return self._vision.self_yaw
+
+    def get_recovery_state(self) -> str:
+        """Return the simulator-side autonomous recovery state."""
+        return getattr(self._vision, "recovery_state", "LOCOMOTION")
+
+    def get_recovery_elapsed(self) -> float:
+        """Return elapsed seconds in the current autonomous recovery."""
+        return float(getattr(self._vision, "recovery_elapsed", 0.0))
 
     def get_ball_pos(self) -> List[Optional[float]]:
         """Return ball position relative to robot or [None, None] if not found."""
@@ -338,6 +379,7 @@ class SimAgent:
                     raise ValueError("--sim-fixed-cmd must be formatted as vx,vy,w")
                 self.sim_fixed_cmd = [float(p) for p in parts]
                 self.sim_fixed_cmd = [float(np.clip(v, -1.0, 1.0)) for v in self.sim_fixed_cmd]
+            self._sim_strategy = getattr(args, "sim_strategy", "push_to_goal")
             trajectory_enabled = bool(
                 getattr(args, "record_trajectory", False)
                 or getattr(args, "trajectory_dir", None)
@@ -515,7 +557,10 @@ class SimAgent:
             "elapsed_s": now_perf - self._trajectory_started_perf,
             "sim_time": response.get("sim_timestamp"),
             "dt_s": dt_s,
-            "run_mode": "fixed_command" if self.sim_fixed_cmd is not None else "fsm",
+            "run_mode": (
+                "fixed_command" if self.sim_fixed_cmd is not None
+                else self._sim_strategy
+            ),
             "team": self.color,
             "robot_id": self._config.get("id", 0),
             "field_length": self._active_field_length,
@@ -625,6 +670,8 @@ class SimAgent:
     def get_objects(self): return self._vision.get_objects()
     def get_self_pos(self): return self._vision.self_pos
     def get_self_yaw(self): return self._vision.self_yaw
+    def get_recovery_state(self): return getattr(self._vision, "recovery_state", "LOCOMOTION")
+    def get_recovery_elapsed(self): return float(getattr(self._vision, "recovery_elapsed", 0.0))
     def get_ball_pos(self): return self._vision.get_ball_pos() if self.get_if_ball() else [None, None]
     
     def get_ball_angle(self):
@@ -677,30 +724,8 @@ class SimAgent:
 
 if __name__ == "__main__":
     """Main entry point."""
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--simulation", action="store_true", help="Run in Sim Mode (ZMQ, No ROS)")
-    parser.add_argument("--ip", default="127.0.0.1", help="Sim IP")
-    parser.add_argument("--port", default="5555", help="Sim Port")
-    parser.add_argument("--id", type=int, default=None, help="Robot ID (overrides config)")
-    parser.add_argument("--color", type=str, default=None, choices=["red", "blue"], help="Team color (red/blue). If set, --id is interpreted as player number within team.")
-    parser.add_argument("--sim-hz", dest="sim_hz", type=float, default=None, help="Simulation control frequency in Hz (<=0 for unlimited)")
-    parser.add_argument(
-        "--sim-fixed-cmd",
-        default=None,
-        help="Debug only: send fixed normalized final command vx,vy,w to the simulator, bypassing user_entry logic.",
-    )
-    parser.add_argument(
-        "--record-trajectory",
-        action="store_true",
-        help="Record robot, ball, command, and FSM diagnostics in simulation mode.",
-    )
-    parser.add_argument(
-        "--trajectory-dir",
-        default=None,
-        help="Trajectory output directory. Supplying it also enables recording.",
-    )
-    
+    parser = build_arg_parser()
+
     # We need to handle known vs unknown args because ROS args might be present if users mistake
     # But since we control the call:
     args, unknown = parser.parse_known_args()

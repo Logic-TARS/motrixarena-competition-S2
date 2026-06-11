@@ -97,6 +97,7 @@ def build_summary(
             "state_transitions": [],
             "kick_count": 0,
             "kicks": [],
+            "push_to_goal": {},
         }
 
     start_t = _float(rows[0], "elapsed_s") or 0.0
@@ -194,7 +195,102 @@ def build_summary(
                 }
         kicks.append(kick_info)
 
-    return {
+    # --- push_to_goal analysis ---
+    push_to_goal = {}
+    if run_mode == "push_to_goal":
+        ball_dists = [
+            _float(row, "ball_distance")
+            for row in rows
+            if _float(row, "ball_distance") is not None
+        ]
+        if ball_dists:
+            push_to_goal["ball_dist_initial"] = ball_dists[0]
+            push_to_goal["ball_dist_min"] = min(ball_dists)
+            push_to_goal["ball_dist_final"] = ball_dists[-1]
+            enter_05 = None
+            for row in rows:
+                bd = _float(row, "ball_distance")
+                if bd is not None and bd <= 0.5:
+                    t = _float(row, "elapsed_s")
+                    if t is not None:
+                        enter_05 = t
+                        break
+            push_to_goal["time_to_enter_0_5m"] = enter_05
+
+        robot_positions = [
+            (_float(row, "elapsed_s"), _float(row, "robot_x"), _float(row, "robot_y"))
+            for row in rows
+        ]
+        robot_positions = [
+            (t, x, y) for t, x, y in robot_positions
+            if None not in (t, x, y)
+        ]
+        if len(robot_positions) >= 2:
+            dx = robot_positions[-1][1] - robot_positions[0][1]
+            dy = robot_positions[-1][2] - robot_positions[0][2]
+            push_to_goal["robot_displacement"] = math.hypot(dx, dy)
+
+        ball_movements = [
+            (_float(row, "elapsed_s"), _float(row, "ball_x"), _float(row, "ball_y"))
+            for row in rows
+        ]
+        ball_movements = [
+            (t, x, y) for t, x, y in ball_movements
+            if None not in (t, x, y)
+        ]
+        if len(ball_movements) >= 2 and rows:
+            field_len = _float(rows[0], "field_length") or 9.0
+            team = str(rows[0].get("team", "red")).strip().lower()
+            goal_sign = -1.0 if team == "blue" else 1.0
+            goal_x = goal_sign * field_len / 2.0
+            ball_dx = ball_movements[-1][1] - ball_movements[0][1]
+            ball_dy = ball_movements[-1][2] - ball_movements[0][2]
+            goal_dx = goal_x - ball_movements[0][1]
+            goal_dy = -ball_movements[0][2]
+            goal_norm = math.hypot(goal_dx, goal_dy)
+            if goal_norm > 1e-9:
+                ux = goal_dx / goal_norm
+                uy = goal_dy / goal_norm
+                push_to_goal["goal_direction_ball_progress"] = ball_dx * ux + ball_dy * uy
+
+            crossed_goal_time = None
+            for t, x, _ in ball_movements:
+                if goal_sign * x >= field_len / 2.0:
+                    crossed_goal_time = t
+                    break
+            push_to_goal["time_to_cross_goal_line"] = crossed_goal_time
+
+        cmd_vx = [
+            _float(row, "cmd_vx") for row in rows
+            if _float(row, "cmd_vx") is not None
+        ]
+        cmd_vy = [
+            _float(row, "cmd_vy") for row in rows
+            if _float(row, "cmd_vy") is not None
+        ]
+        cmd_w = [
+            _float(row, "cmd_w") for row in rows
+            if _float(row, "cmd_w") is not None
+        ]
+        push_to_goal["cmd_statistics"] = {
+            "vx_mean": sum(cmd_vx) / len(cmd_vx) if cmd_vx else None,
+            "vx_max": max(cmd_vx) if cmd_vx else None,
+            "vy_mean": sum(cmd_vy) / len(cmd_vy) if cmd_vy else None,
+            "vy_abs_max": max(map(abs, cmd_vy)) if cmd_vy else None,
+            "w_mean": sum(cmd_w) / len(cmd_w) if cmd_w else None,
+            "w_abs_max": max(map(abs, cmd_w)) if cmd_w else None,
+        }
+        near_vx = []
+        for row in rows:
+            distance = _float(row, "ball_distance")
+            vx = _float(row, "cmd_vx")
+            if distance is not None and distance <= 0.5 and vx is not None:
+                near_vx.append(vx)
+        push_to_goal["near_ball_vx_mean"] = (
+            sum(near_vx) / len(near_vx) if near_vx else None
+        )
+
+    summary: dict[str, Any] = {
         "run_mode": run_mode,
         "fsm_enabled": any(row.get("fsm_state", "") for row in rows),
         "frame_count": len(rows),
@@ -208,7 +304,9 @@ def build_summary(
         "state_transitions": transitions,
         "kick_count": len(kick_entries),
         "kicks": kicks,
+        "push_to_goal": push_to_goal,
     }
+    return summary
 
 
 def _shade_states(ax, rows: list[dict[str, str]]) -> None:

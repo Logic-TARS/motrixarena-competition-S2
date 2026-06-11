@@ -7,6 +7,24 @@
 import math
 
 
+def forward_speed_limit(vx, w, yaw_full_speed=0.25, yaw_zero_speed=1.5, vx_max=1.0):
+    """Scale down forward speed when |w| exceeds yaw_full_speed.
+
+    At |w| <= yaw_full_speed, full vx is allowed.
+    At |w| >= yaw_zero_speed, vx is clamped to 0.
+    Between these thresholds, vx is linearly interpolated.
+
+    This is the same envelope used during training — it prevents the policy
+    from receiving forward commands at yaw rates it has never seen.
+    """
+    yaw_abs = abs(w)
+    if yaw_abs <= yaw_full_speed:
+        return vx
+    span = max(yaw_zero_speed - yaw_full_speed, 1.0e-6)
+    scale = max(0.0, min(1.0, (yaw_zero_speed - yaw_abs) / span))
+    return min(vx, vx_max * scale)
+
+
 class CommandFilter:
     """Post-processes velocity commands to ensure safe, smooth robot motion.
 
@@ -27,6 +45,8 @@ class CommandFilter:
         self.vx_min = 0.0
         self.vy_max = abs(float(cf.get("vy_max", 0.15)))
         self.w_max  = abs(float(cf.get("w_max", 1.5)))
+        self.yaw_full_speed = abs(float(cf.get("yaw_full_speed", 0.25)))
+        self.yaw_zero_speed = abs(float(cf.get("yaw_zero_speed", 1.5)))
 
         # --- acceleration limits (per 20ms frame) ---
         # abs() guards against accidental negative config values — a negative
@@ -54,6 +74,12 @@ class CommandFilter:
         vx = max(self.vx_min, min(self.vx_max, vx))
         vy = max(-self.vy_max, min(self.vy_max, vy))
         w = max(-self.w_max, min(self.w_max, w))
+        vx = forward_speed_limit(
+            vx, w,
+            yaw_full_speed=self.yaw_full_speed,
+            yaw_zero_speed=self.yaw_zero_speed,
+            vx_max=self.vx_max,
+        )
         return vx, vy, w
 
     def apply(self, vx, vy, w):

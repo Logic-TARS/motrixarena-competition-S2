@@ -112,8 +112,8 @@ class InitState:
 
 @dataclass
 class Commands:
-    lin_vel_x: list = field(default_factory=lambda: [0.0, 0.8])
-    lin_vel_y: list = field(default_factory=lambda: [-0.2, 0.2])
+    lin_vel_x: list = field(default_factory=lambda: [0.0, 1.0])
+    lin_vel_y: list = field(default_factory=lambda: [-0.35, 0.35])
     ang_vel_yaw: list = field(default_factory=lambda: [-1.5, 1.5])
     yaw_curriculum: list = field(default_factory=lambda: [0.3, 0.6, 1.0, 1.5])
     curriculum_min_episodes: int = 2048
@@ -123,10 +123,37 @@ class Commands:
     command_deadzone: float = 0.2
     phase_period: float = 0.8
     stand_probability: float = 0.10
-    straight_probability: float = 0.25
-    turn_probability: float = 0.20
+    straight_probability: float = 0.18
+    turn_probability: float = 0.10
+    mixed_turn_probability: float = 0.10
+    direction_change_probability: float = 0.10
+    sprint_turn_probability: float = 0.10
+    straight_vx_range: list | None = None
     yaw_full_speed: float = 0.25
     yaw_zero_speed: float = 1.5
+    # Sustained-turn curriculum (steps at 50 Hz; 0 = off).
+    # Each entry matches a yaw_curriculum level.  The policy must hold
+    # high-yaw / low-vx commands for this many consecutive steps before
+    # a resample is allowed.
+    turn_sustain_curriculum: list = field(
+        default_factory=lambda: [0, 100, 300, 600]  # 0 s, 2 s, 6 s, 12 s
+    )
+    # Minimum vx for mixed-turn commands so the policy always has
+    # non-zero forward velocity during sustained turns (mirrors the
+    # decider's continuous blending).
+    mixed_turn_vx_range: list = field(default_factory=lambda: [0.05, 0.40])
+    # Direction-change (agility) mode: vx > 0 with yaw sign flipping
+    # every direction_change_period_steps.  Trains rapid re-orientation
+    # that soccer (orbit, escape, interception) requires.
+    direction_change_period_steps: int = 75  # 1.5 s @ 50 Hz
+    direction_change_vx_range: list = field(default_factory=lambda: [0.05, 0.35])
+    direction_change_yaw_range: list = field(default_factory=lambda: [0.6, 1.2])
+    # Sprint-turn mode: high forward speed + large yaw simultaneously.
+    # The hardest locomotion pattern — requires the policy to maintain
+    # stability while sprinting through a sharp turn.
+    sprint_turn_vx_range: list = field(default_factory=lambda: [0.50, 0.80])
+    sprint_turn_yaw_range: list = field(default_factory=lambda: [0.8, 1.2])
+    apply_forward_yaw_envelope: bool = True
 
 
 @dataclass
@@ -148,7 +175,7 @@ class NoiseScales:
 @dataclass
 class Noise:
     add_noise: bool = True
-    noise_level: float = 1.0
+    noise_level: float = 1.2
     noise_scales: NoiseScales = field(default_factory=NoiseScales)
 
 
@@ -156,7 +183,7 @@ class Noise:
 class DomainRand:
     push_robots: bool = True
     push_interval_s: float = 5.0
-    max_push_vel_xy: float = 0.4
+    max_push_vel_xy: float = 0.7
 
 
 @dataclass
@@ -183,10 +210,14 @@ class RewardConfig:
         default_factory=lambda: {
             "termination": -10.0,
             "tracking_lin_vel": 2.0,
-            "tracking_ang_vel": 2.0,
+            "tracking_ang_vel": 2.5,
             "lin_vel_z": -2.0,
             "ang_vel_xy": -0.05,
-            "orientation": -1.0,
+            "orientation": -1.5,
+            "turn_stability": -0.8,
+            "turn_survival": 0.15,
+            "direction_change_tracking": 1.5,
+            "sprint_stability": -1.0,
             "base_height": -10.0,
             "torques": -1.0e-5,
             "dof_vel": 0.0,  # Zeroed — was -1e-3, penalises joint velocity
@@ -226,6 +257,11 @@ class RewardConfig:
     straight_motion_yaw_weight: float = 2.0
     straight_motion_lateral_weight: float = 2.0
     gait_frequency: float = 1.5
+    turn_stability_tilt_threshold: float = 0.25
+    turn_stability_min_yaw: float = 0.5
+    direction_change_flip_window: int = 25  # 0.5 s after flip for boosted tracking reward
+    sprint_stability_min_vx: float = 0.5
+    sprint_stability_min_yaw: float = 0.8
 
 
 @registry.envcfg("k1-flat-terrain-walk")
@@ -244,3 +280,61 @@ class K1WalkNpEnvCfg(EnvCfg):
     sensor: Sensor = field(default_factory=Sensor)
     sim_dt: float = 0.002
     ctrl_dt: float = 0.02
+
+
+def _speed_reward_scales() -> dict[str, float]:
+    return {
+        "termination": -10.0,
+        "tracking_lin_vel": 2.0,
+        "tracking_ang_vel": 0.5,
+        "lin_vel_z": -2.0,
+        "ang_vel_xy": -0.05,
+        "orientation": -1.5,
+        "turn_stability": 0.0,
+        "turn_survival": 0.0,
+        "direction_change_tracking": 0.0,
+        "sprint_stability": 0.0,
+        "base_height": -10.0,
+        "torques": -1.0e-5,
+        "dof_vel": 0.0,
+        "dof_acc": -2.5e-7,
+        "feet_air_time": 0.0,
+        "collision": -1.0,
+        "action_rate": -0.01,
+        "dof_pos_limits": -5.0,
+        "alive": 0.05,
+        "hip_pos": -1.0,
+        "contact_no_vel": -0.2,
+        "feet_swing_height": -20.0,
+        "contact": 0.18,
+        "straight_motion": -1.0,
+        "command_forward_vel": 0.5,
+        "overspeed": -0.3,
+    }
+
+
+@registry.envcfg("k1-flat-terrain-walk-speed")
+@dataclass
+class K1WalkSpeedEnvCfg(K1WalkNpEnvCfg):
+    commands: Commands = field(
+        default_factory=lambda: Commands(
+            lin_vel_x=[0.0, 1.0],
+            lin_vel_y=[-0.2, 0.2],
+            ang_vel_yaw=[-1.0, 1.0],
+            yaw_curriculum=[0.3, 0.6, 1.0],
+            resampling_time=10.0,
+            stand_probability=0.10,
+            straight_probability=0.55,
+            turn_probability=0.10,
+            mixed_turn_probability=0.05,
+            direction_change_probability=0.0,
+            sprint_turn_probability=0.0,
+            straight_vx_range=[0.65, 1.0],
+            apply_forward_yaw_envelope=False,
+            turn_sustain_curriculum=[0, 0, 0],
+            direction_change_period_steps=0,
+        )
+    )
+    reward_config: RewardConfig = field(
+        default_factory=lambda: RewardConfig(scales=_speed_reward_scales(), tracking_sigma=0.25)
+    )

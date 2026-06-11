@@ -112,8 +112,8 @@ uv run pytest
 - **SKRL Integration**: RL framework supporting both JAX and PyTorch backends
 - **RSLRL Integration**: RL framework supporting PyTorch backend (use `--rllib rslrl`)
 - **Environment Naming**: Simple string-based environment identification (e.g., "cartpole").
-  K1 environments: `k1-flat-terrain-walk` (47→12 leg locomotion), `k1-getup` (78→22 full-body recovery).
-  Training scripts: `scripts/train_k1_robust_walk.sh` (resume from model_1350), `scripts/train_k1_getup.sh` (from scratch).
+  K1 environments: `k1-flat-terrain-walk` (47→12 leg locomotion, with sustained-turn / agility / sprint-turn command modes), `k1-getup` (78→22 full-body recovery).
+  Training scripts: `scripts/train_k1_robust_walk.sh` (resume from model_1350, baseline), `scripts/train_k1_turn_robust.sh` (resume from latest, turn robustness), `scripts/train_k1_getup.sh` (from scratch).
   RSLRL resume flags: `--resume-policy PATH`, `--resume-noise-std FLOAT`.
 - **Automatic Backend Selection**: For SKRL, training script automatically selects JAX or PyTorch based on GPU availability; RSLRL uses PyTorch only
 - **Multi-Backend Training**: Supports different simulation backends for the same environment

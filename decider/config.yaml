@@ -203,14 +203,32 @@ goalkeeper:
 
 # Command filter — velocity smoothing applied after every skill tick
 cmd_filter:
-  vx_max: 0.90
+  vx_max: 1.00
   vx_min: 0.0
   vy_max: 0.35
-  w_max: 1.5
+  w_max: 1.2
+  yaw_full_speed: 0.25
+  yaw_zero_speed: 1.5
   vx_accel: 0.04
   vy_accel: 0.02
-  w_accel: 0.08
+  w_accel: 0.04
   smooth_alpha: 0.3
+
+# Continuous PushToGoal controller — direct ball-chasing toward opponent goal
+push_to_goal:
+  behind_offset: 0.12
+  far_distance: 0.60
+  push_vx_min: 0.35
+  vx_gain: 2.5
+  vx_max: 1.0
+  vy_gain: 2.5
+  vy_max: 0.20
+  w_gain: 2.5
+  w_max: 0.45
+  turn_only_yaw_deg: 60
+  behind_lateral_tol: 0.15
+  behind_target_tol: 0.08
+  search_w: 0.6
 
 # Top-level Decider FSM thresholds
 decider_fsm:
@@ -223,7 +241,7 @@ decider_fsm:
   approach_behind_setup_dist: 0.75
   approach_waypoint_tolerance: 0.18
   approach_far_ball_dist: 1.50
-  approach_far_vmax: 0.65
+  approach_far_vmax: 0.9
   approach_near_vmax: 0.35
   align_to_dribble_ball_x_min: 0.15
   align_to_dribble_ball_x_max: 0.35
@@ -246,25 +264,6 @@ decider_fsm:
   orbit_waypoint_tolerance: 0.12
   orbit_side_deadband: 0.05
   dribble_to_approach_dist: 0.9
-  sideline_ball_enter_margin: 0.25
-  sideline_ball_exit_margin: 0.55
-  sideline_exit_stable_frames: 5
-  sideline_robot_outside_margin: 0.30
-  sideline_robot_inside_margin: 0.15
-  side_recovery_setup_dist: 0.33
-  side_recovery_forward_weight: 0.60
-  side_recovery_max_linear: 0.35
-  side_recovery_push_vx: 0.30
-  side_recovery_safe_ball_dist: 0.75
-  side_recovery_retreat_step: 0.40
-  side_recovery_bypass_x_offset: 0.50
-  side_recovery_bypass_infield_offset: 0.55
-  side_recovery_cross_outside_offset: 0.12
-  side_recovery_stage_outside_margin: 0.28
-  side_recovery_cross_speed: 0.28
-  side_recovery_stage_tolerance: 0.10
-  side_recovery_face_enter_deg: 10
-  side_recovery_face_exit_deg: 18
   kick_ball_x_min: 0.12
   kick_ball_x_max: 0.30
   kick_ball_y_max: 0.06

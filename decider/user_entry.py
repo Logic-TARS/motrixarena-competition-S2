@@ -19,7 +19,7 @@ if CUR_DIR not in sys.path:
 
 from logic.sub_statemachines import chase_ball, find_ball, go_back_to_field, dribble
 from logic.policy_statemachines import goalkeeper
-from logic.command_filter import CommandFilter
+from logic.command_filter import CommandFilter, forward_speed_limit
 
 import csv
 from datetime import datetime
@@ -548,14 +548,8 @@ class PushToGoalController:
                 return 1.0 if center_dot > 0.0 else -1.0
         return 1.0
 
-    def compute_pose_command(
-        self,
-        target_pos,
-        target_yaw,
-        vx_max,
-        turn_only_yaw=None,
-    ):
-        """Navigate toward a world target using turn-then-forward motion."""
+    def compute_pose_command(self, target_pos, target_yaw, vx_max):
+        """Navigate toward a world target and return an unfiltered intent."""
         robot_w = self.agent.get_self_pos()
         if robot_w is None or robot_w[0] is None:
             return MotionIntent()
@@ -563,8 +557,6 @@ class PushToGoalController:
         robot_yaw_rad = math.radians(float(self.agent.get_self_yaw()))
         yaw_err = self.agent.angle_normalize(target_yaw - robot_yaw_rad)
         cmd_w = float(np.clip(self.kp_yaw * yaw_err, -self.max_yaw, self.max_yaw))
-        if turn_only_yaw is not None and abs(yaw_err) > turn_only_yaw:
-            return MotionIntent(w=cmd_w, mode="TURN_ONLY")
 
         distance = float(np.linalg.norm(np.array(target_pos, dtype=float) - robot_w))
         cmd_x = min(
@@ -680,7 +672,7 @@ class PushToGoalController:
                     return MotionIntent(vx=self.escape_vx, w=escape_w)
                 self.last_mode = "ESCAPE_FACE"
                 self.last_target = None
-                return MotionIntent(w=escape_w, mode="TURN_ONLY")
+                return MotionIntent(vx=self.escape_vx * 0.15, w=escape_w)
 
         # Select and lock the collision-free waypoint sequence before choosing
         # the heading. Orbit movement faces the waypoint, not the goal.
@@ -725,7 +717,7 @@ class PushToGoalController:
                 -self.max_yaw,
                 self.max_yaw,
             ))
-            return MotionIntent(w=face_w, mode="TURN_ONLY")
+            return MotionIntent(vx=self.navigation_min_vx * 0.25, w=face_w)
 
         travel_delta = target_pos - robot_w
         travel_yaw = math.atan2(travel_delta[1], travel_delta[0])
@@ -733,10 +725,9 @@ class PushToGoalController:
             target_pos,
             travel_yaw,
             self.direct_vx_max,
-            turn_only_yaw=self.turn_only_yaw,
         )
         position_mode = self.orbit_phase or "DIRECT_POSITION"
-        self.last_mode = "TURN" if intent.mode == "TURN_ONLY" else position_mode
+        self.last_mode = position_mode
 
         if self.verbose_log:
             self.logger.info(
@@ -765,7 +756,7 @@ class DeciderFSM:
     SEARCH_BALL       – rotate in place to find the ball.
     APPROACH_BALL     – walk toward the ball from behind.
     ALIGN_BEHIND_BALL – fine-position behind the ball facing the goal.
-    SIDE_RECOVERY     – recover the robot or ball from a touchline.
+
     DRIBBLE           – push the ball toward the opponent goal.
     KICK              – execute a single kick, then wait.
     RECOVER           – brief pause after kicking to re-observe.
@@ -839,64 +830,6 @@ class DeciderFSM:
         self._recover_duration_sec = float(cfg.get("recover_duration_sec", 0.5))
         self._search_timeout_sec = float(cfg.get("search_timeout_sec", 15.0))
         self._debug_log_interval_frames = max(1, int(cfg.get("debug_log_interval_frames", 25)))
-        self._sideline_ball_enter_margin = float(
-            cfg.get("sideline_ball_enter_margin", 0.25)
-        )
-        self._sideline_ball_exit_margin = float(
-            cfg.get("sideline_ball_exit_margin", 0.55)
-        )
-        self._sideline_exit_stable_frames = max(
-            1, int(cfg.get("sideline_exit_stable_frames", 5))
-        )
-        self._sideline_robot_outside_margin = float(
-            cfg.get("sideline_robot_outside_margin", 0.30)
-        )
-        self._sideline_robot_inside_margin = float(
-            cfg.get("sideline_robot_inside_margin", 0.15)
-        )
-        self._side_recovery_setup_dist = float(
-            cfg.get("side_recovery_setup_dist", 0.33)
-        )
-        self._side_recovery_forward_weight = float(
-            cfg.get("side_recovery_forward_weight", 0.60)
-        )
-        self._side_recovery_max_linear = float(
-            cfg.get("side_recovery_max_linear", 0.35)
-        )
-        self._side_recovery_push_vx = float(
-            cfg.get("side_recovery_push_vx", 0.30)
-        )
-        self._side_recovery_safe_ball_dist = float(
-            cfg.get("side_recovery_safe_ball_dist", 0.75)
-        )
-        self._side_recovery_retreat_step = float(
-            cfg.get("side_recovery_retreat_step", 0.40)
-        )
-        self._side_recovery_bypass_x_offset = float(
-            cfg.get("side_recovery_bypass_x_offset", 0.50)
-        )
-        self._side_recovery_bypass_infield_offset = float(
-            cfg.get("side_recovery_bypass_infield_offset", 0.55)
-        )
-        self._side_recovery_cross_outside_offset = float(
-            cfg.get("side_recovery_cross_outside_offset", 0.12)
-        )
-        self._side_recovery_stage_outside_margin = float(
-            cfg.get("side_recovery_stage_outside_margin", 0.28)
-        )
-        self._side_recovery_cross_speed = float(
-            cfg.get("side_recovery_cross_speed", 0.28)
-        )
-        self._side_recovery_stage_tolerance = float(
-            cfg.get("side_recovery_stage_tolerance", 0.10)
-        )
-        self._side_recovery_face_enter = math.radians(
-            float(cfg.get("side_recovery_face_enter_deg", 10.0))
-        )
-        self._side_recovery_face_exit = math.radians(
-            float(cfg.get("side_recovery_face_exit_deg", 18.0))
-        )
-
         # --- cached field dimensions ---
         self._field_len, self._field_width = resolve_field_size(agent.get_config())
 
@@ -911,8 +844,6 @@ class DeciderFSM:
         self.kick_triggered = False
         self._frame_counter = 0
         self._last_can_kick_reason = "not_checked"
-        self._side_recovery_phase = "BYPASS_INFIELD"
-        self._sideline_clear_frames = 0
 
         # --- command filter ---
         self.cmd_filter = CommandFilter(agent.get_config())
@@ -987,25 +918,9 @@ class DeciderFSM:
         if gc_state == "STATE_PLAYING" and self.state in ("RETURN_TO_FIELD", "STOP"):
             self.switch("SEARCH_BALL")
 
-        # 3. Field-boundary protection has priority over normal ball handling.
-        if self.state not in (
-            "STOP", "RETURN_TO_FIELD", "KICK", "RECOVER"
-        ):
-            if self._robot_outside_controlled_band():
-                self._side_recovery_phase = "RETURN_FIELD"
-                self._sideline_clear_frames = 0
-                self.switch("SIDE_RECOVERY")
-            elif (
-                self.state in ("APPROACH_BALL", "ALIGN_BEHIND_BALL", "DRIBBLE")
-                and self._ball_near_sideline()
-            ):
-                self._begin_side_recovery()
-                self._sideline_clear_frames = 0
-                self.switch("SIDE_RECOVERY")
-
-        # 4. Lost-ball protection (skip states that manage it themselves)
+        # 3. Lost-ball protection (skip states that manage it themselves)
         if self.state not in ("SEARCH_BALL", "KICK", "RECOVER", "STOP",
-                              "RETURN_TO_FIELD", "SIDE_RECOVERY"):
+                              "RETURN_TO_FIELD"):
             if self.lost_ball_count >= self._ball_lost_frames:
                 self.switch("SEARCH_BALL")
 
@@ -1016,8 +931,6 @@ class DeciderFSM:
             return self._do_approach_ball()
         elif self.state == "ALIGN_BEHIND_BALL":
             return self._do_align_behind_ball()
-        elif self.state == "SIDE_RECOVERY":
-            return self._do_side_recovery()
         elif self.state == "DRIBBLE":
             return self._do_dribble()
         elif self.state == "KICK":
@@ -1043,11 +956,7 @@ class DeciderFSM:
                 if self.state == "ALIGN_BEHIND_BALL"
                 else ""
             ),
-            "side_recovery_phase": (
-                self._side_recovery_phase
-                if self.state == "SIDE_RECOVERY"
-                else ""
-            ),
+            "side_recovery_phase": "",
             "state_duration_s": max(0.0, now - self.state_enter_time),
             "behind_depth": diagnostics.get("behind_depth"),
             "depth_err": diagnostics.get("depth_err"),
@@ -1144,7 +1053,6 @@ class DeciderFSM:
             approach_target,
             travel_yaw,
             vmax,
-            turn_only_yaw=self.push_ctrl.turn_only_yaw,
         )
 
         self.logger.debug(
@@ -1177,193 +1085,6 @@ class DeciderFSM:
         self.agent.move_head(math.inf, math.inf)
         return self._emit_intent(intent, align_brake=True)
 
-    def _do_side_recovery(self):
-        robot_w = self.agent.get_self_pos()
-        if robot_w is None or robot_w[0] is None:
-            return self._emit(0.0, 0.0, 0.0)
-        robot_w = np.array(robot_w, dtype=float)
-        field_y_max = self._field_width / 2.0
-
-        if (
-            abs(float(robot_w[1]))
-            > field_y_max + self._sideline_robot_outside_margin
-            and self._side_recovery_phase != "RETURN_FIELD"
-        ):
-            self._side_recovery_phase = "RETURN_FIELD"
-            self.cmd_filter.reset()
-
-        if self._side_recovery_phase == "RETURN_FIELD":
-            side = 1.0 if robot_w[1] >= 0.0 else -1.0
-            target_pos = np.array(
-                [
-                    robot_w[0],
-                    side * (field_y_max - self._sideline_robot_inside_margin),
-                ],
-                dtype=float,
-            )
-            if abs(float(robot_w[1])) <= field_y_max:
-                if self.agent.get_if_ball() and self._ball_near_sideline():
-                    self._begin_side_recovery()
-                    return self._emit(0.0, 0.0, 0.0, brake=True)
-                elif self.agent.get_if_ball():
-                    self.switch("APPROACH_BALL")
-                    return self._emit(0.0, 0.0, 0.0)
-                else:
-                    self.switch("SEARCH_BALL")
-                    return self._emit(0.0, 0.0, 0.0)
-            else:
-                return self._drive_to_world_target(
-                    target_pos,
-                    self._side_recovery_max_linear,
-                    turn_only_yaw=self.push_ctrl.turn_only_yaw,
-                )
-
-        if not self.agent.get_if_ball():
-            self.switch("SEARCH_BALL")
-            return self._emit(0.0, 0.0, 0.0)
-
-        ball_w = self.agent.get_ball_pos_in_map()
-        if ball_w is None or ball_w[0] is None:
-            self.switch("SEARCH_BALL")
-            return self._emit(0.0, 0.0, 0.0)
-        ball_w = np.array(ball_w, dtype=float)
-
-        if abs(float(ball_w[1])) <= (
-            field_y_max - self._sideline_ball_exit_margin
-        ):
-            self._sideline_clear_frames += 1
-        else:
-            self._sideline_clear_frames = 0
-
-        if self._sideline_clear_frames >= self._sideline_exit_stable_frames:
-            self._sideline_clear_frames = 0
-            next_state = (
-                "ALIGN_BEHIND_BALL"
-                if self.agent.get_ball_distance() < self._approach_to_align_dist
-                else "APPROACH_BALL"
-            )
-            self.switch(next_state)
-            return self._emit(0.0, 0.0, 0.0)
-
-        geometry = self._side_recovery_geometry(ball_w)
-        recovery_dir = geometry["recovery_dir"]
-        recovery_yaw = math.atan2(recovery_dir[1], recovery_dir[0])
-
-        if self._side_recovery_phase == "RETREAT_INFIELD":
-            if (
-                float(np.linalg.norm(ball_w - robot_w))
-                >= self._side_recovery_safe_ball_dist
-            ):
-                self._side_recovery_phase = "BYPASS_INFIELD"
-                return self._emit(0.0, 0.0, 0.0)
-            retreat_target = np.array(
-                [
-                    robot_w[0],
-                    geometry["sideline_side"] * min(
-                        max(
-                            0.0,
-                            abs(float(robot_w[1]))
-                            - self._side_recovery_retreat_step,
-                        ),
-                        abs(float(geometry["infield_y"])),
-                    ),
-                ],
-                dtype=float,
-            )
-            return self._drive_to_world_target(
-                retreat_target,
-                self._side_recovery_max_linear,
-                turn_only_yaw=self.push_ctrl.turn_only_yaw,
-            )
-
-        if self._side_recovery_phase == "BYPASS_INFIELD":
-            bypass_target = geometry["bypass_target"]
-            if self.push_ctrl._path_crosses_ball(
-                robot_w, bypass_target, ball_w
-            ):
-                bypass_target = np.array(
-                    [robot_w[0], geometry["infield_y"]],
-                    dtype=float,
-                )
-            if (
-                float(np.linalg.norm(robot_w - geometry["bypass_target"]))
-                <= self._side_recovery_stage_tolerance
-            ):
-                if not self.push_ctrl._path_crosses_ball(
-                    robot_w, geometry["cross_target"], ball_w
-                ):
-                    self._side_recovery_phase = "CROSS_OUTSIDE"
-                    return self._emit(0.0, 0.0, 0.0)
-            return self._drive_to_world_target(
-                bypass_target,
-                self._side_recovery_max_linear,
-                turn_only_yaw=self.push_ctrl.turn_only_yaw,
-            )
-
-        if self._side_recovery_phase == "CROSS_OUTSIDE":
-            cross_target = geometry["cross_target"]
-            if (
-                float(np.linalg.norm(robot_w - cross_target))
-                <= self._side_recovery_stage_tolerance
-            ):
-                if not self.push_ctrl._path_crosses_ball(
-                    robot_w, geometry["staging_target"], ball_w
-                ):
-                    self._side_recovery_phase = "STAGE_OUTSIDE"
-                    return self._emit(0.0, 0.0, 0.0)
-            return self._drive_to_world_target(
-                cross_target,
-                self._side_recovery_cross_speed,
-                turn_only_yaw=self.push_ctrl.turn_only_yaw,
-            )
-
-        if self._side_recovery_phase == "STAGE_OUTSIDE":
-            staging_target = geometry["staging_target"]
-            if (
-                float(np.linalg.norm(robot_w - staging_target))
-                <= self._side_recovery_stage_tolerance
-            ):
-                self._side_recovery_phase = "BRAKE_FACE_IN"
-                return self._emit(0.0, 0.0, 0.0, brake=True)
-            return self._drive_to_world_target(
-                staging_target,
-                self._side_recovery_cross_speed,
-                turn_only_yaw=self.push_ctrl.turn_only_yaw,
-            )
-
-        if self._side_recovery_phase == "BRAKE_FACE_IN":
-            if self.cmd_filter.is_translation_stopped(
-                self._brake_translation_tol
-            ):
-                self._side_recovery_phase = "FACE_IN"
-                return self._emit(0.0, 0.0, 0.0)
-            return self._emit(0.0, 0.0, 0.0, brake=True)
-
-        robot_yaw_rad = math.radians(float(self.agent.get_self_yaw()))
-        yaw_err = self.agent.angle_normalize(recovery_yaw - robot_yaw_rad)
-        cmd_w = float(np.clip(
-            self.push_ctrl.kp_yaw * yaw_err,
-            -self.push_ctrl.max_yaw,
-            self.push_ctrl.max_yaw,
-        ))
-        if self._side_recovery_phase == "FACE_IN":
-            if abs(yaw_err) <= self._side_recovery_face_enter:
-                self._side_recovery_phase = "PUSH"
-                return self._emit(0.0, 0.0, 0.0)
-            return self._emit(0.0, 0.0, cmd_w, turn_only=True)
-
-        if self._side_recovery_phase == "PUSH":
-            if abs(yaw_err) > self._side_recovery_face_exit:
-                self._side_recovery_phase = "BRAKE_FACE_IN"
-                return self._emit(0.0, 0.0, 0.0, brake=True)
-            return self._emit(self._side_recovery_push_vx, 0.0, cmd_w)
-
-        unknown_phase = self._side_recovery_phase
-        self.logger.error(
-            f"[SIDE_RECOVERY] unknown phase={unknown_phase!r}; resetting safely"
-        )
-        self._begin_side_recovery()
-        return self._emit(0.0, 0.0, 0.0, brake=True)
 
     def _do_dribble(self):
         ball_dist = self.agent.get_ball_distance()
@@ -1527,76 +1248,7 @@ class DeciderFSM:
             - self._ball_to_goal_unit(ball_w) * self._approach_setup_dist
         )
 
-    def _robot_outside_controlled_band(self):
-        robot_w = self.agent.get_self_pos()
-        if robot_w is None or robot_w[0] is None:
-            return False
-        return abs(float(robot_w[1])) > (
-            self._field_width / 2.0 + self._sideline_robot_outside_margin
-        )
-
-    def _ball_near_sideline(self):
-        if not self.agent.get_if_ball():
-            return False
-        ball_w = self.agent.get_ball_pos_in_map()
-        if ball_w is None or ball_w[0] is None:
-            return False
-        return abs(float(ball_w[1])) >= (
-            self._field_width / 2.0 - self._sideline_ball_enter_margin
-        )
-
-    def _begin_side_recovery(self):
-        self._side_recovery_phase = (
-            "RETREAT_INFIELD"
-            if self.agent.get_ball_distance()
-            < self._side_recovery_safe_ball_dist
-            else "BYPASS_INFIELD"
-        )
-
-    def _side_recovery_geometry(self, ball_w):
-        ball_w = np.array(ball_w, dtype=float)
-        sideline_side = 1.0 if ball_w[1] >= 0.0 else -1.0
-        recovery_dir = np.array(
-            [self._side_recovery_forward_weight, -sideline_side],
-            dtype=float,
-        )
-        recovery_dir /= float(np.linalg.norm(recovery_dir))
-        staging_target = ball_w - recovery_dir * self._side_recovery_setup_dist
-        field_y_max = self._field_width / 2.0
-        staging_target[1] = float(np.clip(
-            staging_target[1],
-            -field_y_max - self._side_recovery_stage_outside_margin,
-            field_y_max + self._side_recovery_stage_outside_margin,
-        ))
-        infield_y = sideline_side * (
-            field_y_max - self._side_recovery_bypass_infield_offset
-        )
-        bypass_target = np.array(
-            [
-                ball_w[0] - self._side_recovery_bypass_x_offset,
-                infield_y,
-            ],
-            dtype=float,
-        )
-        cross_target = np.array(
-            [
-                ball_w[0] - self._side_recovery_bypass_x_offset,
-                sideline_side * (
-                    field_y_max + self._side_recovery_cross_outside_offset
-                ),
-            ],
-            dtype=float,
-        )
-        return {
-            "recovery_dir": recovery_dir,
-            "sideline_side": sideline_side,
-            "infield_y": infield_y,
-            "bypass_target": bypass_target,
-            "cross_target": cross_target,
-            "staging_target": staging_target,
-        }
-
-    def _drive_to_world_target(self, target_pos, vmax, turn_only_yaw=None):
+    def _drive_to_world_target(self, target_pos, vmax):
         robot_w = self.agent.get_self_pos()
         if robot_w is None or robot_w[0] is None:
             return self._emit(0.0, 0.0, 0.0)
@@ -1609,7 +1261,6 @@ class DeciderFSM:
             target_pos,
             travel_yaw,
             vmax,
-            turn_only_yaw=turn_only_yaw,
         )
         return self._emit_intent(cmd)
 
@@ -1841,22 +1492,363 @@ def loop(agent) -> None:
         agent.get_logger().error(f"Error in user_entry loop: {e}")
         traceback.print_exc()
 
+
+@dataclass
+class DirectChaseConfig:
+    """Tunable parameters for the direct-chase controller."""
+
+    stop_distance: float = 0.35
+    vx_gain: float = 1.2
+    vx_max: float = 1.0
+    w_gain: float = 2.0
+    w_max: float = 1.2
+    search_w: float = 0.6
+    yaw_full_speed: float = 0.25
+    yaw_zero_speed: float = 1.5
+    vx_accel: float = 0.08
+    w_accel: float = 0.08
+    smooth_alpha: float = 0.6
+
+    @classmethod
+    def from_agent(cls, agent):
+        cmd_filter = agent.get_config().get("cmd_filter", {})
+        return cls(
+            yaw_full_speed=abs(float(cmd_filter.get("yaw_full_speed", 0.25))),
+            yaw_zero_speed=abs(float(cmd_filter.get("yaw_zero_speed", 1.5))),
+        )
+
+
+class DirectChaseController:
+    """Simple, aggressive ball-chase controller.
+
+    - Only active during STATE_PLAYING; all other game states force a stop.
+    - Ball visible: compute raw vx/w, then apply the shared forward-yaw
+      envelope, acceleration limiting, and low-pass smoothing.
+    - Ball lost: rotate in place at *search_w*.
+    - Ball within *stop_distance*: immediately stop, bypassing the filter
+      so residual speed does not carry the robot through the ball.
+    """
+
+    def __init__(self, cfg=None):
+        self.cfg = cfg if cfg is not None else DirectChaseConfig()
+        self._last_vx: float = 0.0
+        self._last_w: float = 0.0
+
+    def reset(self) -> None:
+        self._last_vx = 0.0
+        self._last_w = 0.0
+
+    def tick(self, agent) -> None:
+        gc_state = agent.gamecontroller.game_state
+
+        # Only move during active play.
+        if gc_state != "STATE_PLAYING":
+            agent.current_cmd = [0.0, 0.0, 0.0]
+            self.reset()
+            return
+
+        if not agent.get_if_ball():
+            # Ball lost — rotate to search.
+            # Guard against missing position data.
+            pos = agent.get_self_pos()
+            if pos is None or pos[1] is None:
+                direction = 1.0
+            else:
+                direction = -1.0 if float(pos[1]) > 0 else 1.0
+            w = self.cfg.search_w * direction
+            vx = 0.0
+        else:
+            ball_pos = agent.get_ball_pos()
+            ball_x = float(ball_pos[0])
+            ball_y = float(ball_pos[1])
+            heading = math.atan2(ball_y, ball_x)
+            distance = math.hypot(ball_x, ball_y)
+
+            if distance <= self.cfg.stop_distance:
+                # Immediate stop — bypass filter to avoid residual speed.
+                agent.current_cmd = [0.0, 0.0, 0.0]
+                self.reset()
+                return
+
+            # Raw commands
+            raw_vx = np.clip(
+                self.cfg.vx_gain * (distance - self.cfg.stop_distance),
+                0.0,
+                self.cfg.vx_max,
+            )
+            raw_w = np.clip(
+                self.cfg.w_gain * heading,
+                -self.cfg.w_max,
+                self.cfg.w_max,
+            )
+
+            # Shared forward-yaw envelope
+            vx = forward_speed_limit(
+                raw_vx,
+                raw_w,
+                yaw_full_speed=self.cfg.yaw_full_speed,
+                yaw_zero_speed=self.cfg.yaw_zero_speed,
+                vx_max=self.cfg.vx_max,
+            )
+            w = raw_w
+
+        # Acceleration limiting
+        vx = np.clip(vx, self._last_vx - self.cfg.vx_accel,
+                     self._last_vx + self.cfg.vx_accel)
+        w = np.clip(w, self._last_w - self.cfg.w_accel,
+                    self._last_w + self.cfg.w_accel)
+
+        # Low-pass smoothing
+        alpha = self.cfg.smooth_alpha
+        vx = alpha * vx + (1.0 - alpha) * self._last_vx
+        w = alpha * w + (1.0 - alpha) * self._last_w
+
+        self._last_vx = vx
+        self._last_w = w
+
+        agent.current_cmd = [vx, 0.0, w]
+
+
+@dataclass
+class PushToGoalConfig:
+    """Tunable parameters for the continuous PushToGoal controller."""
+
+    behind_offset: float = 0.12
+    far_distance: float = 0.60
+    push_vx_min: float = 0.35
+    vx_gain: float = 2.5
+    vx_max: float = 1.0
+    vy_gain: float = 2.5
+    vy_max: float = 0.20
+    w_gain: float = 2.5
+    w_max: float = 0.45
+    turn_only_yaw_deg: float = 60.0
+    behind_lateral_tol: float = 0.15
+    behind_target_tol: float = 0.08
+    search_w: float = 0.6
+
+    @classmethod
+    def from_config(cls, config: dict):
+        ptg = config.get("push_to_goal", {})
+        return cls(
+            behind_offset=float(ptg.get("behind_offset", 0.12)),
+            far_distance=float(ptg.get("far_distance", 0.60)),
+            push_vx_min=float(ptg.get("push_vx_min", 0.35)),
+            vx_gain=float(ptg.get("vx_gain", 2.5)),
+            vx_max=float(ptg.get("vx_max", 1.0)),
+            vy_gain=float(ptg.get("vy_gain", 2.5)),
+            vy_max=float(ptg.get("vy_max", 0.20)),
+            w_gain=float(ptg.get("w_gain", 2.5)),
+            w_max=float(ptg.get("w_max", 0.45)),
+            turn_only_yaw_deg=float(ptg.get("turn_only_yaw_deg", 60.0)),
+            behind_lateral_tol=float(ptg.get("behind_lateral_tol", 0.15)),
+            behind_target_tol=float(ptg.get("behind_target_tol", 0.08)),
+            search_w=float(ptg.get("search_w", 0.6)),
+        )
+
+
+class ContinuousPushToGoal:
+    """Stateless continuous ball-chasing controller toward opponent goal.
+
+    Every frame computes a behind-ball target position and generates
+    raw normalized commands without filtering.  No discrete states,
+    no CommandFilter, no stop distance — the robot continuously pushes
+    the ball toward the opponent goal.
+    """
+
+    def __init__(
+        self,
+        cfg: PushToGoalConfig = None,
+        field_length: float = None,
+    ):
+        if cfg is None:
+            cfg = PushToGoalConfig()
+        self.cfg = cfg
+        self._field_length = field_length
+        self._last_ball_side: float = 0.0
+
+    @staticmethod
+    def _finite_xy(value):
+        if value is None:
+            return None
+        try:
+            if len(value) < 2:
+                return None
+            result = np.asarray(value[:2], dtype=float)
+        except (TypeError, ValueError, IndexError):
+            return None
+        return result if np.all(np.isfinite(result)) else None
+
+    def tick(self, agent) -> None:
+        # --- game state gate ---
+        gc_state = getattr(
+            getattr(agent, "gamecontroller", None), "game_state", None
+        )
+        if gc_state != "STATE_PLAYING":
+            agent.current_cmd = [0.0, 0.0, 0.0]
+            return
+
+        # --- position guard ---
+        robot_w = self._finite_xy(agent.get_self_pos())
+        if robot_w is None:
+            agent.current_cmd = [0.0, 0.0, 0.0]
+            return
+
+        # --- ball loss: search ---
+        if not agent.get_if_ball():
+            direction = 1.0 if self._last_ball_side >= 0.0 else -1.0
+            agent.current_cmd = [0.0, 0.0, direction * self.cfg.search_w]
+            return
+
+        # --- opponent goal ---
+        if self._field_length is None:
+            self._field_length = resolve_field_size(agent.get_config())[0]
+        field_length = float(self._field_length)
+        color = getattr(agent, "color", "red")
+        goal_sign = 1.0 if color == "red" else -1.0
+        goal = np.array([goal_sign * field_length / 2.0, 0.0], dtype=float)
+
+        # --- ball position ---
+        ball_w = self._finite_xy(agent.get_ball_pos_in_map())
+        if ball_w is None:
+            agent.current_cmd = [0.0, 0.0, 0.0]
+            return
+        if goal_sign * float(ball_w[0]) >= field_length / 2.0:
+            agent.current_cmd = [0.0, 0.0, 0.0]
+            return
+
+        # --- behind-ball target (world frame) ---
+        to_goal = goal - ball_w
+        to_goal_norm = float(np.linalg.norm(to_goal))
+        if to_goal_norm < 1e-9:
+            agent.current_cmd = [0.0, 0.0, 0.0]
+            return
+        to_goal_unit = to_goal / to_goal_norm
+        ball_delta = ball_w - robot_w
+        ball_distance = float(np.linalg.norm(ball_delta))
+        if ball_distance < 1.0e-9:
+            ball_direction = to_goal_unit
+        else:
+            ball_direction = ball_delta / ball_distance
+
+        behind_target = ball_w - to_goal_unit * self.cfg.behind_offset
+        target_delta = behind_target - robot_w
+        target_distance = float(np.linalg.norm(target_delta))
+        behind_depth = float(np.dot(ball_delta, to_goal_unit))
+        behind_lateral = float(
+            to_goal_unit[0] * ball_delta[1]
+            - to_goal_unit[1] * ball_delta[0]
+        )
+        aligned_behind = (
+            behind_depth > 0.0
+            and abs(behind_lateral) <= self.cfg.behind_lateral_tol
+        )
+
+        if ball_distance >= self.cfg.far_distance:
+            desired_direction = ball_direction
+        elif aligned_behind and target_distance <= self.cfg.behind_target_tol:
+            desired_direction = to_goal_unit
+        else:
+            desired_direction = target_delta
+        desired_norm = float(np.linalg.norm(desired_direction))
+        if desired_norm < 1.0e-9:
+            desired_direction = to_goal_unit if aligned_behind else ball_direction
+        else:
+            desired_direction /= desired_norm
+
+        try:
+            robot_yaw_deg = float(agent.get_self_yaw())
+        except (TypeError, ValueError):
+            agent.current_cmd = [0.0, 0.0, 0.0]
+            return
+        if not math.isfinite(robot_yaw_deg):
+            agent.current_cmd = [0.0, 0.0, 0.0]
+            return
+        robot_yaw_rad = math.radians(robot_yaw_deg)
+
+        cos_yaw = math.cos(robot_yaw_rad)
+        sin_yaw = math.sin(robot_yaw_rad)
+        body_forward = float(
+            float(desired_direction[0]) * cos_yaw
+            + float(desired_direction[1]) * sin_yaw
+        )
+        body_lateral = float(
+            -float(desired_direction[0]) * sin_yaw
+            + float(desired_direction[1]) * cos_yaw
+        )
+        heading_error = _angle_normalize(
+            math.atan2(body_lateral, body_forward)
+        )
+        speed = min(
+            self.cfg.vx_max,
+            self.cfg.vx_gain
+            * max(ball_distance - self.cfg.behind_offset, 0.0),
+        )
+        if ball_distance < self.cfg.far_distance:
+            speed = max(speed, self.cfg.push_vx_min)
+
+        # --- raw commands (no filter, no envelope) ---
+        w = max(-self.cfg.w_max, min(
+            self.cfg.w_gain * heading_error,
+            self.cfg.w_max,
+        ))
+        if abs(math.degrees(heading_error)) >= self.cfg.turn_only_yaw_deg:
+            vx = 0.0
+            vy = 0.0
+        else:
+            vx = max(0.0, speed * body_forward)
+            vy = max(-self.cfg.vy_max, min(
+                speed * body_lateral,
+                self.cfg.vy_max,
+            ))
+
+        agent.current_cmd = [vx, vy, w]
+
+        # remember which side the ball was on for search direction
+        ball_local = agent.get_ball_pos()
+        if ball_local is not None and ball_local[1] is not None:
+            self._last_ball_side = float(ball_local[1])
+
+
+def _angle_normalize(angle: float) -> float:
+    """Normalize an angle to [-pi, pi]."""
+    return (angle + math.pi) % (2.0 * math.pi) - math.pi
+
+
 def game(agent) -> None:
     """Top-level game logic — dispatched every frame (~50 Hz).
 
-    Simulation mode uses the DeciderFSM state machine.
+    Simulation mode dispatches to the strategy selected by --sim-strategy:
+      - push_to_goal: continuous ball chasing toward opponent goal (default)
+      - direct_chase: simple aggressive ball chase (diagnostic)
     ROS mode falls through to the legacy GameController test path.
     """
     if getattr(agent, "is_simulation", False):
-        # --- Simulation: FSM-based decision making ---
-        decider = getattr(agent, "_decider_fsm", None)
-        if decider is None:
-            agent._decider_fsm = DeciderFSM(agent)
-            decider = agent._decider_fsm
-        vx, vy, w = decider.tick()
-        # _emit() already writes to agent.current_cmd
-        decider._debug_log()
-        return
+        strategy = getattr(agent, "_sim_strategy", "push_to_goal")
+
+        if strategy == "push_to_goal":
+            ctrl = getattr(agent, "_push_to_goal_controller", None)
+            if ctrl is None:
+                field_length, _ = resolve_field_size(agent.get_config())
+                ctrl = ContinuousPushToGoal(
+                    PushToGoalConfig.from_config(agent.get_config()),
+                    field_length=field_length,
+                )
+                agent._push_to_goal_controller = ctrl
+            ctrl.tick(agent)
+            agent.move_head(math.inf, math.inf)
+            return
+
+        if strategy == "direct_chase":
+            ctrl = getattr(agent, "_direct_chase_controller", None)
+            if ctrl is None:
+                ctrl = DirectChaseController(DirectChaseConfig.from_agent(agent))
+                agent._direct_chase_controller = ctrl
+            ctrl.tick(agent)
+            agent.move_head(math.inf, math.inf)
+            return
+
+        raise ValueError(f"Unsupported simulation strategy: {strategy!r}")
 
     # --- ROS mode: legacy path (unchanged) ---
     _gc_test_go_back_to_field(agent)
