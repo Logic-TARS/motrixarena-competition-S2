@@ -33,6 +33,7 @@ build/
 
 # Local Codex/Claude workspace state
 /.claude/
+/.mimocode/
 
 # Generated match recordings and trajectory reports
 /video/
