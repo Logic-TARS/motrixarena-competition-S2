@@ -10,7 +10,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TEAM_SIZE="${TEAM_SIZE:-1}"
 REAL_TIME="--real-time"
 # Use exported TorchScript model (with built-in EmpiricalNormalization from RSLRL training)
-POLICY_ARG="--policy $REPO_ROOT/MotrixLab/exported/model_1350_torchscript.pt"
+POLICY_ARG="--policy $REPO_ROOT/MotrixLab/exported/model_1200_turn_robust_torchscript.pt"
 BLUE_POLICY_ARG=""
 RECORD_ARG=""
 

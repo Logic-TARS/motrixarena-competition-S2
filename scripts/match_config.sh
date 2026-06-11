@@ -8,7 +8,7 @@
 # ============================================================================
 TEAM_SIZE="${TEAM_SIZE:-1}"
 REAL_TIME="--real-time"
-POLICY_ARG="--policy $REPO_ROOT/MotrixLab/runs/k1-flat-terrain-walk/rslrl/26-06-08_21-37-09-_386985_PPO/model_1350.pt"
+POLICY_ARG="--policy $REPO_ROOT/MotrixLab/exported/model_1200_turn_robust_torchscript.pt --k1-policy-flavor motrixlab"
 BLUE_POLICY_ARG=""
 COLOR="${COLOR:-red}"
 ROBOT_ID="${ROBOT_ID:-0}"
@@ -44,7 +44,7 @@ parse_args() {
             --referee-state)   REFEREE_STATE_ARG="--referee-state $2"; shift 2 ;;
             --policy-debug)    SIM_EXTRA="$SIM_EXTRA --policy-debug"; shift ;;
             --policy-debug-interval) SIM_EXTRA="$SIM_EXTRA --policy-debug-interval $2"; shift 2 ;;
-            --trajectory)       TRAJECTORY_ENABLED=1; shift ;;
+            --t)       TRAJECTORY_ENABLED=1; shift ;;
             --trajectory-dir)   TRAJECTORY_ENABLED=1; TRAJECTORY_DIR="$2"; shift 2 ;;
             --d)               DURATION="$2"; shift 2 ;;
             --output)          OUTPUT="$2"; shift 2 ;;
