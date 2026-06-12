@@ -8,6 +8,7 @@ __pycache__/
 # Logs, generated debug output, and temporary archives
 logs/
 debug_logs/
+video/
 *.log
 *.zip
 *.bak
