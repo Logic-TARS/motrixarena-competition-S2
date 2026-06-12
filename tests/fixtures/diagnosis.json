@@ -1,0 +1,74 @@
+{
+  "meta": {
+    "csv_path": "/home/1ctnltug/Motrix3v3-simple-push/tests/fixtures/traj_push_no_progress.csv",
+    "frame_count": 11,
+    "duration_s": 5.0,
+    "run_mode": "fsm_mvp",
+    "config_source": "hardcoded_defaults",
+    "diagnosis_applicable": true
+  },
+  "state_summary": {
+    "states_entered": [
+      "SEARCH",
+      "CHASE",
+      "ALIGN_BEHIND",
+      "PUSH_FORWARD"
+    ],
+    "state_durations_s": {
+      "ALIGN_BEHIND": 1.0,
+      "CHASE": 1.5,
+      "PUSH_FORWARD": 2.0,
+      "SEARCH": 0.5
+    },
+    "align_mode_durations_s": {
+      "ALIGN_BEHIND": 0.5,
+      "ALIGN_FACE_GOAL": 0.5,
+      "CHASE": 1.5,
+      "PUSH_FORWARD": 2.0,
+      "WAIT_PLAYING": 0.5
+    },
+    "did_reach_chase": true,
+    "did_reach_align_behind": true,
+    "did_reach_push_forward": true,
+    "last_state": "PUSH_FORWARD",
+    "transitions": [
+      {
+        "time_s": 0.5,
+        "from": "SEARCH",
+        "to": "CHASE"
+      },
+      {
+        "time_s": 2.0,
+        "from": "CHASE",
+        "to": "ALIGN_BEHIND"
+      },
+      {
+        "time_s": 3.0,
+        "from": "ALIGN_BEHIND",
+        "to": "PUSH_FORWARD"
+      }
+    ],
+    "time_to_enter_0_5m": 1.5,
+    "ball_dist_initial": 3.0,
+    "ball_dist_min": 0.28,
+    "ball_dist_final": 0.28
+  },
+  "push_execution": {
+    "entered_push_forward": true,
+    "push_forward_segments": 1,
+    "total_push_forward_frames": 5,
+    "push_cmd_vy_nonzero_count": 0,
+    "ball_goal_progress_during_push": 0.0,
+    "ball_lateral_drift_during_push": 0.0,
+    "has_goal_progress": false,
+    "has_excess_lateral_drift": false
+  },
+  "primary_blocker": {
+    "condition": "push_no_goal_progress",
+    "evidence": "PUSH_FORWARD was entered but ball made no progress toward goal (goal_progress=0.0m).",
+    "pass_rate": null
+  },
+  "suggestions": [
+    "PUSH 期间球未向球门推进：提高 push_vx 或检查推球方向"
+  ]
+}

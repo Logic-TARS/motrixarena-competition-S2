@@ -476,6 +476,287 @@ class PushToGoalController:
         self.agent.move_head(math.inf, math.inf)
 
 
+class ContinuousPushController:
+    """Continuous error-space controller — no FSM states, no mode switches.
+
+    Five error terms computed every frame, blended through a sigmoid
+    distance-dependent weight.  Far from the ball → approach behaviour;
+    near the ball → behind-depth / lateral / yaw alignment → push to goal.
+
+    Key invariants:
+      - behind_depth = dot(ball - robot, to_goal)  →  positive == robot
+        is behind the ball (good for pushing).
+      - Sideline repulsion is computed in world frame then rotated into
+        the body frame before composing with cmd_x / cmd_y.
+      - vy and w are soft-clipped with tanh to prevent long-duration
+        command saturation.
+    """
+
+    # ------------------------------------------------------------------
+    # Tunable parameters (can be overridden via config.yaml)
+    # ------------------------------------------------------------------
+    _DEFAULTS = {
+        "k_approach": 0.5,          # approach P-gain (vx ∝ ball distance when far)
+        "k_depth": 2.0,             # behind-depth P-gain
+        "k_lat": 1.5,               # lateral error P-gain
+        "k_yaw": 1.8,               # yaw error P-gain
+        "k_sideline": 1.2,          # sideline repulsion gain
+
+        "target_behind": 0.15,      # desired metres behind ball (along to_goal)
+        "d_transition": 1.0,        # ball distance at 50/50 blend (metres)
+        "d_scale": 0.4,             # sigmoid steepness
+
+        "vx_max_approach": 0.9,     # max approach vx when far (unitless)
+        "vx_max_push": 0.8,         # max push vx when near
+        "vx_max_push_rev": 0.2,     # max reverse speed when too close
+        "vy_max": 0.7,              # lateral velocity cap
+        "w_max": 1.5,               # angular velocity cap
+
+        "sideline_margin": 0.8,     # metres from sideline where repulsion starts
+        "soft_clip_threshold": 0.7, # vy / w soft-clip entry point
+    }
+
+    def __init__(self, agent):
+        self.agent = agent
+        self.logger = agent.get_logger().get_child("ContPush")
+
+        config = agent.get_config()
+        league = config.get("league", "M")
+        field_dims = config.get("field_size", {}).get(league, [14.0, 9.0])
+        self.field_length = float(field_dims[0])
+        self.field_width = float(field_dims[1])
+
+        # Load parameters (config overrides hardcoded defaults)
+        user_params = config.get("continuous_push", {})
+        for key, default in self._DEFAULTS.items():
+            setattr(self, key, user_params.get(key, default))
+
+        # Diagnostics (read by _record_trajectory)
+        self._last_errors = {}
+        self._last_cmd = (0.0, 0.0, 0.0)
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _sigmoid(x):
+        """Sigmoid 1/(1+exp(-x))."""
+        # Clamp input to avoid overflow
+        x = max(-20.0, min(20.0, x))
+        return 1.0 / (1.0 + math.exp(-x))
+
+    @staticmethod
+    def _soft_clip(value, threshold):
+        """Soft-clip: linear below *threshold*, tanh-compressed above.
+
+        The output is always strictly in (-1, 1) — it never reaches ±1.
+        The tanh input is clamped at 6.0 to avoid float64 precision loss
+        (tanh(6) ≈ 0.9999877, distinguishable from 1.0).
+        """
+        if abs(value) <= threshold:
+            return value
+        excess = min((abs(value) - threshold) / (1.0 - threshold + 1e-9), 6.0)
+        return math.copysign(threshold + (1.0 - threshold) * math.tanh(excess), value)
+
+    def _send_final_cmd(self, vx, vy, w):
+        """Send desired final sim command without re-saturating in SimAgent.
+
+        SimAgent.cmd_vel() applies config scaling before publishing to the
+        ZMQ action layer.  The continuous controller computes in that final
+        command space, so divide by the configured scale first.
+        """
+        config = self.agent.get_config()
+        sx = float(config.get("max_walk_vel_x", 1.0)) or 1.0
+        sy = float(config.get("max_walk_vel_y", 1.0)) or 1.0
+        sw = float(config.get("max_walk_vel_theta", 1.0)) or 1.0
+        self.agent.cmd_vel(
+            float(np.clip(vx / sx, -1.0, 1.0)),
+            float(np.clip(vy / sy, -1.0, 1.0)),
+            float(np.clip(w / sw, -1.0, 1.0)),
+        )
+
+    # ------------------------------------------------------------------
+    # Error computation
+    # ------------------------------------------------------------------
+
+    def _compute_errors(self, ball_w, robot_w, robot_yaw_rad, goal):
+        """Return a dict with all five error terms plus derived geometry."""
+        # -- ball → goal direction --
+        to_goal = goal - ball_w
+        dist_to_goal = float(np.linalg.norm(to_goal))
+        if dist_to_goal < 0.01:
+            to_goal_unit = np.array([1.0, 0.0], dtype=float)
+            perp_unit = np.array([0.0, 1.0], dtype=float)
+        else:
+            to_goal_unit = to_goal / dist_to_goal
+            perp_unit = np.array([-to_goal_unit[1], to_goal_unit[0]], dtype=float)
+
+        # -- behind depth:  ball_w - robot_w  projected onto to_goal --
+        #    positive = robot is behind the ball (desired for pushing).
+        delta_w = ball_w - robot_w   # vector from robot TO ball
+        behind_depth = float(np.dot(delta_w, to_goal_unit))
+
+        # -- lateral error: robot offset from ball→goal line --
+        delta_rb = robot_w - ball_w   # vector from ball TO robot
+        lateral_err = float(np.dot(delta_rb, perp_unit))
+        # positive = robot is left of the ball→goal line
+
+        # -- yaw error: face the goal --
+        target_yaw_rad = math.atan2(
+            goal[1] - robot_w[1], goal[0] - robot_w[0]
+        )
+        yaw_err = self.agent.angle_normalize(target_yaw_rad - robot_yaw_rad)
+
+        # -- ball distance --
+        ball_dist = self.agent.get_ball_distance()
+
+        # -- sideline risk (world frame) --
+        half_w = self.field_width / 2.0
+        dist_to_right = float(robot_w[1] - (-half_w))
+        dist_to_left = float(half_w - robot_w[1])
+        sideline_risk = max(0.0, self.sideline_margin - min(dist_to_right, dist_to_left))
+        if dist_to_left < dist_to_right:
+            sideline_repulsion_y = -sideline_risk
+        elif dist_to_right < dist_to_left:
+            sideline_repulsion_y = sideline_risk
+        else:
+            sideline_repulsion_y = 0.0
+
+        return {
+            "behind_depth": behind_depth,
+            "lateral_err": lateral_err,
+            "to_goal_unit": to_goal_unit,
+            "yaw_err_rad": yaw_err,
+            "yaw_err_deg": math.degrees(yaw_err),
+            "ball_dist": ball_dist,
+            "sideline_risk": sideline_risk,
+            "sideline_repulsion_y": sideline_repulsion_y,
+            "dist_to_goal": dist_to_goal,
+        }
+
+    # ------------------------------------------------------------------
+    # Main control loop
+    # ------------------------------------------------------------------
+
+    def run(self):
+        # --- 1. Guards ---
+        if not self.agent.get_if_ball():
+            self.logger.debug("[ContPush] No ball — stop, let find_ball takeover.")
+            self.agent.cmd_vel(0, 0, 0)
+            self._last_errors = {}
+            self._last_cmd = (0.0, 0.0, 0.0)
+            return
+
+        ball_w = self.agent.get_ball_pos_in_map()
+        robot_w = self.agent.get_self_pos()
+        if ball_w is None or robot_w is None or ball_w[0] is None or robot_w[0] is None:
+            self.logger.warning("[ContPush] Bad position data, stopping.")
+            self.agent.cmd_vel(0, 0, 0)
+            self._last_errors = {}
+            self._last_cmd = (0.0, 0.0, 0.0)
+            return
+
+        ball_w = np.array(ball_w, dtype=float)
+        robot_w = np.array(robot_w, dtype=float)
+        robot_yaw_deg = self.agent.get_self_yaw()
+        robot_yaw_rad = math.radians(robot_yaw_deg)
+        goal = np.array([self.field_length / 2.0, 0.0], dtype=float)
+
+        # --- 2. Compute all errors ---
+        err = self._compute_errors(ball_w, robot_w, robot_yaw_rad, goal)
+        d_ball = err["ball_dist"]
+        goal_dist = err["dist_to_goal"]
+
+        # --- 3. Distance-dependent blend ---
+        alpha = self._sigmoid((d_ball - self.d_transition) / self.d_scale)
+        # alpha → 0  near ball (push regime)
+        # alpha → 1  far from ball (approach regime)
+        w_near = 1.0 - alpha   # push / alignment weight
+        w_far = alpha           # approach / chase weight
+
+        # Continuous target: far away, move to the ball; near the ball,
+        # drift toward the ball-behind point.  Convert world error to body
+        # frame so approach works regardless of robot heading.
+        approach_target = ball_w - err["to_goal_unit"] * (self.target_behind * w_near)
+        target_delta = approach_target - robot_w
+        c = math.cos(robot_yaw_rad)
+        s = math.sin(robot_yaw_rad)
+        target_body_x = float(target_delta[0] * c + target_delta[1] * s)
+        target_body_y = float(-target_delta[0] * s + target_delta[1] * c)
+
+        # --- 4. VX — forward velocity ---
+        # Far: navigate toward the continuous target in body frame.
+        vx_approach = float(np.clip(
+            self.k_approach * target_body_x,
+            -self.vx_max_push_rev,
+            self.vx_max_approach,
+        ))
+
+        # Near: behind-depth P-control.
+        depth_err_vx = err["behind_depth"] - self.target_behind
+        vx_push = float(np.clip(
+            self.k_depth * depth_err_vx,
+            -self.vx_max_push_rev,
+            self.vx_max_push,
+        ))
+
+        # Scale forward push by alignment quality — don't rush if badly misaligned.
+        alignment_factor = max(0.3, 1.0 - abs(err["yaw_err_rad"]) / math.pi)
+        # Blend near / far
+        vx_raw = w_near * vx_push * alignment_factor + w_far * vx_approach
+        vx = float(np.clip(vx_raw, -0.3, 1.0))
+
+        # --- 5. VY — lateral correction + sideline repulsion ---
+        vy_approach = float(np.clip(self.k_approach * target_body_y, -self.vy_max, self.vy_max))
+        vy_lat = float(np.clip(-self.k_lat * err["lateral_err"], -self.vy_max, self.vy_max))
+
+        # Sideline repulsion: push toward field centre (Y=0) in WORLD frame,
+        # then rotate into body frame before adding to cmd_x / cmd_y.
+        world_repulsion_y = float(err["sideline_repulsion_y"] * self.k_sideline)
+        # Rotate world repulsion [0, world_repulsion_y] into body frame.
+        body_rep_x = world_repulsion_y * s   # from vx = wx*cos+wy*sin, wx=0
+        body_rep_y = world_repulsion_y * c   # from vy = -wx*sin+wy*cos, wx=0
+
+        # Fade sideline repulsion near goal (don't push away from goal line).
+        near_goal_factor = float(np.clip((goal_dist - 2.0) / 4.0, 0.0, 1.0))
+        body_rep_x *= near_goal_factor
+        body_rep_y *= near_goal_factor
+
+        vy = w_far * vy_approach + w_near * vy_lat + body_rep_y
+        vy = float(np.clip(vy, -self.vy_max, self.vy_max))
+
+        # --- 6. W — yaw control with near-ball damping ---
+        w_raw = self.k_yaw * err["yaw_err_rad"]
+        w_damping = 0.3 + 0.7 * float(
+            np.clip((d_ball - 0.3) / 0.5, 0.0, 1.0)
+        )
+        w = float(np.clip(w_raw * w_damping, -self.w_max, self.w_max))
+
+        # --- 7. Anti-saturation soft-clip (vy, w only; vx stays linear) ---
+        vy = self._soft_clip(vy, self.soft_clip_threshold)
+        w = self._soft_clip(w, self.soft_clip_threshold)
+
+        # --- 8. Apply sideline repulsion vx component ---
+        vx = float(np.clip(vx + body_rep_x * 0.2, -0.3, 1.0))
+        # Only a fraction (0.2x) so forward push dominates.
+
+        # --- 9. Store diagnostics ---
+        self._last_errors = err
+        self._last_cmd = (vx, vy, w)
+
+        # --- 10. Issue command ---
+        distance_info = (
+            f"d_ball={d_ball:.2f} alpha={alpha:.2f} "
+            f"behind={err['behind_depth']:.3f} lat={err['lateral_err']:.3f} "
+            f"yaw={err['yaw_err_deg']:.1f}deg sideline={err['sideline_risk']:.2f}"
+        )
+        self.logger.debug(f"[ContPush] {distance_info} → cmd=({vx:.2f},{vy:.2f},{w:.2f})")
+
+        self._send_final_cmd(vx, vy, w)
+        self.agent.move_head(math.inf, math.inf)
+
+
 def init(agent) -> None:
     agent.get_logger().info("[UserEntry] Initializing Logic...")
     
@@ -489,8 +770,11 @@ def init(agent) -> None:
     # Initialize Advanced Dribbler
     agent.adv_dribbler = AdvancedDribbler(agent)
 
-    # Initialize Push-to-Goal controller
+    # Initialize Push-to-Goal controller (kept for reference / fallback)
     agent.push_to_goal = PushToGoalController(agent)
+
+    # Initialize Continuous Push controller (primary attacker strategy)
+    agent.continuous_push = ContinuousPushController(agent)
 
     agent.state_machine_runners = {
         "chase_ball": agent.chase_ball_machine.run,
@@ -515,14 +799,168 @@ def loop(agent) -> None:
         agent.get_logger().error(f"Error in user_entry loop: {e}")
         traceback.print_exc()
 
+
+def _navigate_to_pose(agent, target_x, target_y, target_yaw_deg=None,
+                      kp_pos=1.5, kp_yaw=1.5, max_vel=0.6, max_yaw=1.5):
+    """Navigate to a world-coordinate target using P-control body-frame commands.
+
+    Args:
+        agent: SimAgent instance.
+        target_x, target_y: World-coordinate target position (metres).
+        target_yaw_deg: Desired yaw in degrees.  None = face opponent goal.
+        kp_pos: Position P-gain.
+        kp_yaw: Yaw P-gain.
+        max_vel: Max linear velocity (config-scaled unitless).
+        max_yaw: Max angular velocity (config-scaled unitless).
+
+    Returns:
+        True when within 0.3 m and 0.2 rad of the target.
+    """
+    robot_pos = agent.get_self_pos()
+    robot_yaw_deg = agent.get_self_yaw()
+    if robot_pos is None or robot_pos[0] is None:
+        agent.cmd_vel(0, 0, 0)
+        return False
+
+    robot_yaw_rad = math.radians(robot_yaw_deg)
+
+    # World-frame position error
+    err_wx = target_x - robot_pos[0]
+    err_wy = target_y - robot_pos[1]
+
+    # Rotate into body frame
+    c = math.cos(robot_yaw_rad)
+    s = math.sin(robot_yaw_rad)
+    err_body_x = err_wx * c + err_wy * s
+    err_body_y = -err_wx * s + err_wy * c
+
+    # Yaw error
+    if target_yaw_deg is not None:
+        target_yaw_rad = math.radians(target_yaw_deg)
+    else:
+        league = agent.get_config().get("league", "M")
+        field_dims = agent.get_config().get("field_size", {}).get(league, [14.0, 9.0])
+        goal_x = float(field_dims[0]) / 2.0
+        target_yaw_rad = math.atan2(0.0 - robot_pos[1], goal_x - robot_pos[0])
+
+    yaw_err = agent.angle_normalize(target_yaw_rad - robot_yaw_rad)
+
+    # P-control with clipping
+    cmd_x = float(np.clip(kp_pos * err_body_x, -max_vel, max_vel))
+    cmd_y = float(np.clip(kp_pos * err_body_y, -max_vel, max_vel))
+    cmd_w = float(np.clip(kp_yaw * yaw_err, -max_yaw, max_yaw))
+
+    agent.cmd_vel(cmd_x, cmd_y, cmd_w)
+    agent.move_head(math.inf, math.inf)
+
+    dist = math.hypot(err_wx, err_wy)
+    return dist < 0.3 and abs(yaw_err) < 0.2
+
+
+def _support_role(agent):
+    """Support role (id=1): position behind the ball on the ball-to-own-goal line.
+
+    Stays ~1.2 m behind the ball so the attacker can push forward unimpeded.
+    Stops if the ball is closer than 1.0 m to avoid interfering.
+    """
+    ball_map = agent.get_ball_pos_in_map()
+    robot_pos = agent.get_self_pos()
+
+    if ball_map is None or ball_map[0] is None or robot_pos is None or robot_pos[0] is None:
+        agent.cmd_vel(0, 0, 0)
+        return
+
+    league = agent.get_config().get("league", "M")
+    field_dims = agent.get_config().get("field_size", {}).get(league, [14.0, 9.0])
+    field_length = float(field_dims[0])
+    field_width = float(field_dims[1])
+    own_goal_x = -field_length / 2.0
+
+    # Direction from ball toward own goal
+    dx = own_goal_x - ball_map[0]
+    dy = 0.0 - ball_map[1]
+    dist_goal = math.hypot(dx, dy)
+    if dist_goal < 0.01:
+        dx, dy = -1.0, 0.0
+        dist_goal = 1.0
+
+    # Target: 1.2 m behind ball on the ball-to-own-goal line
+    support_dist = 1.2
+    target_x = ball_map[0] + (dx / dist_goal) * support_dist
+    target_y = ball_map[1] + (dy / dist_goal) * support_dist
+
+    # Clamp to field bounds
+    half_w = field_width / 2.0
+    target_x = max(-field_length / 2.0, min(field_length / 2.0, target_x))
+    target_y = max(-half_w, min(half_w, target_y))
+
+    # Stay away from the ball
+    if agent.get_if_ball() and agent.get_ball_distance() < 1.0:
+        agent.cmd_vel(0, 0, 0)
+        return
+
+    _navigate_to_pose(agent, target_x, target_y, max_vel=0.4, kp_pos=1.2)
+
+
+def _defender_role(agent):
+    """Defender role (id=2): hold position in own half, follow ball Y laterally.
+
+    Anchors at X = -2 m (own half), tracks ball Y clamped to +/- 3 m.
+    Moves backward if the ball gets closer than 2.0 m.
+    """
+    ball_map = agent.get_ball_pos_in_map()
+    robot_pos = agent.get_self_pos()
+
+    if robot_pos is None or robot_pos[0] is None:
+        agent.cmd_vel(0, 0, 0)
+        return
+
+    league = agent.get_config().get("league", "M")
+    field_dims = agent.get_config().get("field_size", {}).get(league, [14.0, 9.0])
+    field_length = float(field_dims[0])
+    field_width = float(field_dims[1])
+
+    # Anchor in own half (~2/7 of own-half depth from centre)
+    anchor_x = -field_length * 0.15
+
+    # Follow ball Y, damped
+    ball_y = 0.0
+    if ball_map is not None and ball_map[0] is not None:
+        ball_y = ball_map[1]
+
+    half_w = field_width / 2.0
+    target_y = float(np.clip(ball_y, -3.0, 3.0))
+    target_x = anchor_x
+
+    # Back away if ball is too close
+    if agent.get_if_ball() and agent.get_ball_distance() < 2.0:
+        agent.cmd_vel(-0.3, 0, 0)
+        return
+
+    _navigate_to_pose(agent, target_x, target_y, max_vel=0.35, kp_pos=1.0)
+
+
 def game(agent) -> None:
     if getattr(agent, "is_simulation", False):
-        if not agent.get_if_ball():
-            agent.state_machine_runners["find_ball"]()
+        role = getattr(agent, "_player_id", getattr(agent, "id", 0))
+        if role == 0:
+            # Attacker: find_ball + continuous push-to-goal controller
+            if not agent.get_if_ball():
+                agent.state_machine_runners["find_ball"]()
+            else:
+                agent.continuous_push.run()
+        elif role == 1:
+            _support_role(agent)
+        elif role == 2:
+            _defender_role(agent)
         else:
-            agent.push_to_goal.run()
+            # Fallback for extra ids: treat as attacker
+            if not agent.get_if_ball():
+                agent.state_machine_runners["find_ball"]()
+            else:
+                agent.continuous_push.run()
         return
-    
+
     # --- Select Test to Run ---
     # _playing_logic(agent)        # Default: Full Playing Logic
     # _test_adv_dribble(agent)     # TEST ARGUMENT: Using Advanced Dribble
