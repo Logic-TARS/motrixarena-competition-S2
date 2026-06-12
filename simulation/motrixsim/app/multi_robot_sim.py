@@ -5,11 +5,13 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import socket
 import sys
 import tempfile
 import time
+from datetime import datetime
 import types
 from copy import deepcopy
 from dataclasses import dataclass
@@ -37,6 +39,7 @@ from .runtime_config import (
     K1_AMP_NUM_OBS,
     K1_AMP_NUM_SINGLE_OBS,
     K1_AMP_ACTION_SCALE,
+    K1_AMP_UPPER_BODY_JOINTS,
     K1_FULL_BODY_NUM_ACT,
     K1_FULL_BODY_NUM_OBS,
     K1_LEGGED_GYM_ACTION_SCALE,
@@ -54,6 +57,15 @@ from .runtime_config import (
     CMD_VEL_NORM_MIN,
     K1_LEGGED_GYM_NUM_OBS,
     K1_LEGGED_GYM_TORQUE_LIMIT,
+    K1_MOTRIXLAB_ACTION_SCALE,
+    K1_MOTRIXLAB_CMD_SCALE,
+    K1_MOTRIXLAB_DOF_POS_SCALE,
+    K1_MOTRIXLAB_DOF_VEL_SCALE,
+    K1_MOTRIXLAB_GYRO_SCALE,
+    K1_MOTRIXLAB_KD,
+    K1_MOTRIXLAB_KP,
+    K1_MOTRIXLAB_TORQUE_LIMIT,
+    K1_POLICY_FLAVOR_MOTRIXLAB,
     K1_ROBOT_TYPE,
     MAX_ROBOTS_PER_TEAM,
     PI_PLUS_KD_POLICY_ORDER,
@@ -1403,10 +1415,11 @@ PI_PLUS_DEFAULT_DOF_POS_MUJOCO = np.asarray(
 )
 
 # K1 walk/stand hybrid: body-frame command (vx, vy, yaw rate) gates legged vs full-body policy.
-K1_HYBRID_WALK_ENTER_LIN = 0.07
-K1_HYBRID_WALK_EXIT_LIN = 0.035
-K1_HYBRID_WALK_ENTER_YAW = 0.18
-K1_HYBRID_WALK_EXIT_YAW = 0.07
+# Lowered from (0.07,0.035,0.18,0.07) to reduce stand-policy latency at low speeds.
+K1_HYBRID_WALK_ENTER_LIN = 0.04
+K1_HYBRID_WALK_EXIT_LIN = 0.02
+K1_HYBRID_WALK_ENTER_YAW = 0.10
+K1_HYBRID_WALK_EXIT_YAW = 0.04
 
 
 @dataclass
@@ -1455,6 +1468,7 @@ class RobotSpec:
     k1_amp_hist: np.ndarray | None = None
     k1_amp_last_mjcf: np.ndarray | None = None
     k1_amp_gather_mjcf: np.ndarray | None = None
+    k1_amp_upper_mjcf: np.ndarray | None = None
 
 
 class MultiRobotMotrixSim:
@@ -1504,9 +1518,12 @@ class MultiRobotMotrixSim:
         )
 
         self.model = mtx.load_model(str(scene_xml))
+        # Override MJCF timestep to match the MotrixLab training environment
+        # (MotrixLab sets model.options.timestep = cfg.sim_dt = 0.002 in env.py).
+        # Without this, the policy runs at 250 Hz instead of the trained 50 Hz,
+        # and the gait phase clock drifts to ~24 % of the expected rate.
+        self.model.options.timestep = 0.002
         self.data = mtx.SceneData(self.model, batch=[1])
-        # Keep physics coefficients aligned with MuJoCo source scene (world.xml),
-        # including timestep/options loaded in the model.
         self.sim_dt = float(self.model.options.timestep)
         self.control_decimation = int(self.robot_cfg.control_decimation)
 
@@ -1735,7 +1752,8 @@ class MultiRobotMotrixSim:
                     self._policy_action_dim = K1_LEGGED_GYM_NUM_ACT
                     print(
                         f"[MultiRobotMotrixSim] K1 legged_gym TorchScript: {path} "
-                        f"(obs_dim={self._policy_obs_dim}, act_dim={self._policy_action_dim})"
+                        f"(obs_dim={self._policy_obs_dim}, act_dim={self._policy_action_dim}, "
+                        f"flavor={self.robot_cfg.k1_policy_flavor})"
                     )
                     return
 
@@ -1749,7 +1767,8 @@ class MultiRobotMotrixSim:
                 self._policy_is_torchscript = False
                 print(
                     f"[MultiRobotMotrixSim] K1 legged_gym Torch actor: {path} "
-                    f"(obs_dim={self._policy_obs_dim}, act_dim={self._policy_action_dim})"
+                    f"(obs_dim={self._policy_obs_dim}, act_dim={self._policy_action_dim}, "
+                    f"flavor={self.robot_cfg.k1_policy_flavor})"
                 )
                 return
 
@@ -2024,12 +2043,18 @@ class MultiRobotMotrixSim:
                 k1_gait_phase = 0.0
                 for i, jn in enumerate(K1_LEGGED_GYM_LEG_JOINTS_POLICY_ORDER):
                     li = int(leg_idx_list[i])
-                    kp[li] = float(K1_LEGGED_GYM_KP[jn])
-                    kd[li] = float(K1_LEGGED_GYM_KD[jn])
-                    effort[li] = float(K1_LEGGED_GYM_TORQUE_LIMIT)
+                    if self.robot_cfg.k1_policy_flavor == K1_POLICY_FLAVOR_MOTRIXLAB:
+                        kp[li] = float(K1_MOTRIXLAB_KP[jn])
+                        kd[li] = float(K1_MOTRIXLAB_KD[jn])
+                        effort[li] = float(K1_MOTRIXLAB_TORQUE_LIMIT[jn])
+                    else:
+                        kp[li] = float(K1_LEGGED_GYM_KP[jn])
+                        kd[li] = float(K1_LEGGED_GYM_KD[jn])
+                        effort[li] = float(K1_LEGGED_GYM_TORQUE_LIMIT)
             k1_amp_hist = None
             k1_amp_last_mjcf = None
             k1_amp_gather_mjcf = None
+            k1_amp_upper_mjcf = None
             if self.robot_cfg.use_k1_amp_onnx:
                 k1_amp_gather_mjcf = np.asarray(
                     [joint_names.index(n) for n in K1_AMP_ACTUATOR_JOINT_ORDER],
@@ -2037,6 +2062,10 @@ class MultiRobotMotrixSim:
                 )
                 k1_amp_hist = np.zeros((K1_AMP_FRAME_STACK, K1_AMP_NUM_SINGLE_OBS), dtype=np.float32)
                 k1_amp_last_mjcf = np.zeros((K1_AMP_NUM_ACT,), dtype=np.float32)
+                k1_amp_upper_mjcf = np.asarray(
+                    [i for i, name in enumerate(K1_AMP_ACTUATOR_JOINT_ORDER) if name in K1_AMP_UPPER_BODY_JOINTS],
+                    dtype=np.int32,
+                )
             specs[rid] = RobotSpec(
                 rid=rid,
                 name=name,
@@ -2079,6 +2108,7 @@ class MultiRobotMotrixSim:
                 k1_amp_hist=k1_amp_hist,
                 k1_amp_last_mjcf=k1_amp_last_mjcf,
                 k1_amp_gather_mjcf=k1_amp_gather_mjcf,
+                k1_amp_upper_mjcf=k1_amp_upper_mjcf,
             )
         return specs
 
@@ -2173,6 +2203,20 @@ class MultiRobotMotrixSim:
         diff = (dof_pos_leg - spec.k1_legged_default_dof) * float(K1_LEGGED_GYM_DOF_POS_SCALE)
         dvel = dof_vel_leg * float(K1_LEGGED_GYM_DOF_VEL_SCALE)
         last_a = spec.k1_legged_last_action.astype(np.float32)
+
+        if self.robot_cfg.k1_policy_flavor == K1_POLICY_FLAVOR_MOTRIXLAB:
+            obs = np.zeros((K1_LEGGED_GYM_NUM_OBS,), dtype=np.float32)
+            obs[0:3] = gyro.astype(np.float32) * float(K1_MOTRIXLAB_GYRO_SCALE)
+            obs[3:6] = gravity
+            obs[6:9] = self._k1_legged_cmd_obs_from_norm_cmd(cmd_src) * K1_MOTRIXLAB_CMD_SCALE
+            obs[9:21] = (dof_pos_leg - spec.k1_legged_default_dof) * float(K1_MOTRIXLAB_DOF_POS_SCALE)
+            obs[21:33] = dof_vel_leg * float(K1_MOTRIXLAB_DOF_VEL_SCALE)
+            obs[33:45] = last_a
+            obs[45] = s_g
+            obs[46] = c_g
+            obs = np.nan_to_num(obs, nan=0.0, posinf=0.0, neginf=0.0)
+            c = float(self.robot_cfg.obs_clip)
+            return np.clip(obs, -c, c)
 
         obs = np.zeros((K1_LEGGED_GYM_NUM_OBS,), dtype=np.float32)
         obs[0:3] = gravity
@@ -2424,7 +2468,9 @@ class MultiRobotMotrixSim:
                     debug_obs = debug_obs_list[i].copy()
                     debug_act = act.copy()
                 if self.robot_cfg.use_k1_amp_onnx:
-                    act_mjcf = act.astype(np.float32, copy=False).reshape(K1_AMP_NUM_ACT)
+                    act_mjcf = act.astype(np.float32, copy=False).reshape(K1_AMP_NUM_ACT).copy()
+                    if spec.k1_amp_upper_mjcf is not None and spec.k1_amp_upper_mjcf.size > 0:
+                        act_mjcf[spec.k1_amp_upper_mjcf] = 0.0
                     if spec.k1_amp_last_mjcf is not None:
                         spec.k1_amp_last_mjcf[:] = act_mjcf
                     pol_to_mjcf = np.asarray(
@@ -2483,9 +2529,13 @@ class MultiRobotMotrixSim:
                         jidx = int(spec.k1_legged_joint_indices[kk])
                         spec.last_action[jidx] = act[kk]
                     spec.target_joint_pos[:] = spec.init_angles
-                    asc = float(K1_LEGGED_GYM_ACTION_SCALE)
                     for kk in range(K1_LEGGED_GYM_NUM_ACT):
                         jidx = int(spec.k1_legged_joint_indices[kk])
+                        jn = K1_LEGGED_GYM_LEG_JOINTS_POLICY_ORDER[kk]
+                        if self.robot_cfg.k1_policy_flavor == K1_POLICY_FLAVOR_MOTRIXLAB:
+                            asc = float(K1_MOTRIXLAB_ACTION_SCALE[jn])
+                        else:
+                            asc = float(K1_LEGGED_GYM_ACTION_SCALE)
                         spec.target_joint_pos[jidx] = float(spec.k1_legged_default_dof[kk] + act[kk] * asc)
                     if spec.joint_lower is not None and spec.joint_upper is not None:
                         np.clip(spec.target_joint_pos, spec.joint_lower, spec.joint_upper, out=spec.target_joint_pos)
@@ -2559,6 +2609,10 @@ class MultiRobotMotrixSim:
         for k in range(n):
             ai = int(idx[k])
             ctrl = float(val[k])
+            try:
+                self.data.actuator_ctrls[0, ai] = ctrl
+            except Exception:
+                pass
             applied = False
             try:
                 actuator = self.model.get_actuator(ai)
@@ -3148,6 +3202,28 @@ class MultiRobotMotrixSim:
         img[max(0, ya) : min(h, yb + 1), max(0, xa) : min(w, xa + 2)] = 230
         img[max(0, ya) : min(h, yb + 1), max(0, xb - 1) : min(w, xb + 1)] = 230
 
+        # Draw goals at both ends of the field.
+        goal_half_w = 0.5 * float(getattr(self, "_goal_width", 1.9))
+        goal_depth = 1.0  # metres
+        _white = np.array([230, 230, 230], dtype=np.uint8)
+        for goal_x_sign in (-1, 1):
+            gx0, gy0 = to_px(goal_x_sign * half_l, goal_half_w)
+            gx1, gy1 = to_px(goal_x_sign * (half_l + goal_depth), -goal_half_w)
+            gxa, gxb = sorted((gx0, gx1))
+            gya, gyb = sorted((gy0, gy1))
+            # goal net area (slightly darker than lines)
+            gy_inner_a = gya + 2
+            gy_inner_b = gyb - 2
+            gx_inner_a = gxa + 2
+            gx_inner_b = gxb - 2
+            if gy_inner_a < gy_inner_b and gx_inner_a < gx_inner_b:
+                img[max(0, gy_inner_a):min(h, gy_inner_b + 1),
+                    max(0, gx_inner_a):min(w, gx_inner_b + 1)] = np.array([180, 180, 180], dtype=np.uint8)
+            # goal frame (top / bottom / back edges)
+            img[max(0, gya):min(h, gya + 2), max(0, gxa):min(w, gxb + 1)] = _white
+            img[max(0, gyb - 1):min(h, gyb + 1), max(0, gxa):min(w, gxb + 1)] = _white
+            img[max(0, gya):min(h, gyb + 1), max(0, gxb - 1):min(w, gxb + 1)] = _white
+
         states = self.state_for_web()
         ball = states.get("ball", {})
         bx, by = to_px(float(ball.get("x", 0.0)), float(ball.get("y", 0.0)))
@@ -3335,7 +3411,8 @@ class MultiRobotMotrixSim:
         elif cmd == "stoptimer":
             self.referee.set_auto_state_enabled(False)
 
-    def zmq_loop(self, port: int, webview: MujocoLabWebView | None, web_fps: int, width: int, height: int):
+    def zmq_loop(self, port: int, webview: MujocoLabWebView | None, web_fps: int, width: int, height: int,
+                 record_video_dir: str | None = None):
         context = zmq.Context()
         socket = context.socket(zmq.REP)
         socket.bind(f"tcp://*:{port}")
@@ -3343,6 +3420,13 @@ class MultiRobotMotrixSim:
         use_real_time = bool(self.args.real_time or (webview is not None))
         if webview is not None and not self.args.real_time:
             print("[MotrixWebView] forcing real-time stepping for web responsiveness")
+
+        record_counter = 0
+        record_interval = 1.0 / 30.0  # 30 fps recording
+        next_record_time = time.time()
+        if record_video_dir is not None:
+            os.makedirs(record_video_dir, exist_ok=True)
+            print(f"[MotrixRecord] Saving frames to {record_video_dir} at 30 fps")
 
         renderer = None
         frame_interval = 1.0 / max(1, web_fps)
@@ -3363,7 +3447,7 @@ class MultiRobotMotrixSim:
                     cmds = webview.poll_commands()
                     counter, reset_triggered = self._apply_web_commands(cmds, counter)
 
-                flags = zmq.NOBLOCK if webview is not None else 0
+                flags = zmq.NOBLOCK  # always non-blocking so sim steps at physics rate
                 got_msg = False
                 msg = None
                 try:
@@ -3407,7 +3491,7 @@ class MultiRobotMotrixSim:
                         "ack_timestamp": client_ts,
                     }
                     socket.send_json(response)
-                elif webview is not None and not reset_triggered:
+                elif not reset_triggered:
                     counter = self._step_once(counter)
 
                 if webview is not None:
@@ -3421,6 +3505,37 @@ class MultiRobotMotrixSim:
                     if now >= next_state_emit_time:
                         webview.emit_robot_states(self.state_for_web())
                         next_state_emit_time = now + state_emit_interval
+
+                if record_video_dir is not None:
+                    now = time.time()
+                    if now >= next_record_time:
+                        try:
+                            from PIL import Image, ImageDraw, ImageFont
+                        except ImportError:
+                            print("[MotrixRecord] pillow not installed. Run: pip install pillow")
+                            record_video_dir = None
+                        else:
+                            try:
+                                frame = self._render_topdown_web_frame(width, height)
+                                img = Image.fromarray(frame)
+                                draw = ImageDraw.Draw(img)
+                                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                try:
+                                    font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 18)
+                                except Exception:
+                                    font = ImageFont.load_default()
+                                bbox = draw.textbbox((0, 0), ts, font=font)
+                                tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+                                pad = 6
+                                draw.rectangle([(0, 0), (tw + pad * 2, th + pad * 2)], fill=(0, 0, 0, 180))
+                                draw.text((pad, pad), ts, fill=(255, 255, 255), font=font)
+                                fpath = os.path.join(record_video_dir, f"frame_{record_counter:06d}.png")
+                                img.save(fpath)
+                                record_counter += 1
+                                next_record_time = now + record_interval
+                            except Exception as e:
+                                print(f"[MotrixRecord] frame save error: {e}")
+                                record_video_dir = None
 
                 if use_real_time:
                     wait_time = float(self.model.options.timestep) - (time.time() - step_start)
@@ -3493,6 +3608,7 @@ def run_sim(args: RuntimeArgs, template_dir: Path):
             web_fps=args.web_fps,
             width=args.web_width,
             height=args.web_height,
+            record_video_dir=args.record_video,
         )
     finally:
         if webview is not None:

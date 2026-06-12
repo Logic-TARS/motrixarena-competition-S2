@@ -17,7 +17,6 @@ debug_logs/
 docx/
 examples/
 envs/
-legged_gym/sim_soccer2/
 * (copy).*
 
 # Virtual environments and build outputs

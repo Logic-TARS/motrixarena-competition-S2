@@ -27,6 +27,7 @@ skrl-torch = [
 ]
 rslrl = [
     "rsl-rl-lib>=4.0.0",
+    "tensorboard>=2.20.0",
     "torch===2.7.0+cu128",
     "torchvision===v0.22.0+cu128",
     "torchaudio===2.7.0+cu128",

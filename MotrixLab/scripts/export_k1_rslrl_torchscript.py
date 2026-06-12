@@ -16,28 +16,21 @@
 import argparse
 from pathlib import Path
 
+from _source_path import ensure_source_path
+
+ensure_source_path()
+
 import torch
 from rsl_rl.runners import OnPolicyRunner
-from tensordict import TensorDict
 
 from motrix_envs import registry as env_registry
 from motrix_rl import registry as rl_registry
 from motrix_rl.rslrl.torch.wrap_vec_env import RslrlNpEnvWrap
 
 
-class TensorPolicyWrapper(torch.nn.Module):
-    def __init__(self, policy: torch.nn.Module):
-        super().__init__()
-        self.policy = policy
-
-    def forward(self, obs: torch.Tensor) -> torch.Tensor:
-        td = TensorDict({"policy": obs}, batch_size=[obs.shape[0]], device=obs.device)
-        return self.policy(td)
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Export an RSLRL K1 checkpoint to a 52->12 TorchScript policy."
+        description="Export an RSLRL K1 checkpoint to a single-input/single-output 47->12 TorchScript policy."
     )
     parser.add_argument("checkpoint", type=Path, help="RSLRL checkpoint, for example runs/.../model_199.pt")
     parser.add_argument(
@@ -52,6 +45,20 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _check_shape(output: torch.Tensor, num_actions: int) -> None:
+    if tuple(output.shape) != (1, num_actions):
+        raise RuntimeError(f"Unexpected exported policy shape {tuple(output.shape)}")
+
+
+def _export_torchscript(actor: torch.nn.Module, output_path: Path, num_obs: int, num_actions: int) -> None:
+    exported = actor.as_jit().cpu().eval()
+    example = torch.zeros(1, num_obs, dtype=torch.float32)
+    with torch.no_grad():
+        scripted = torch.jit.script(exported)
+        _check_shape(scripted(example), num_actions)
+    scripted.save(str(output_path))
+
+
 def main() -> None:
     args = parse_args()
     device = torch.device(args.device)
@@ -62,21 +69,15 @@ def main() -> None:
     runner = OnPolicyRunner(vec_env, rlcfg.runner.to_dict(), log_dir=None, device=device)
     runner.load(str(args.checkpoint))
 
-    policy = runner.get_inference_policy(device=device)
-    wrapped = TensorPolicyWrapper(policy).to(device).eval()
-    example = torch.zeros(1, vec_env.num_obs, dtype=torch.float32, device=device)
-    with torch.no_grad():
-        traced = torch.jit.trace(wrapped, example, strict=False)
-        output = traced(example)
-
-    if tuple(output.shape) != (1, vec_env.num_actions):
-        raise RuntimeError(f"Unexpected exported policy shape {tuple(output.shape)}")
-    if vec_env.num_obs != 52 or vec_env.num_actions != 12:
-        raise RuntimeError(f"K1 runtime expects 52->12, got {vec_env.num_obs}->{vec_env.num_actions}")
+    if vec_env.num_obs != 47 or vec_env.num_actions != 12:
+        raise RuntimeError(f"K1 G1-style runtime expects 47->12, got {vec_env.num_obs}->{vec_env.num_actions}")
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    traced.save(str(args.output))
-    print(f"Exported {args.output} ({vec_env.num_obs}->{vec_env.num_actions})")
+    actor = runner.alg.actor
+    if getattr(actor, "is_recurrent", False):
+        raise RuntimeError("Submission-safe export requires a non-recurrent MLP actor")
+    _export_torchscript(actor, args.output, vec_env.num_obs, vec_env.num_actions)
+    print(f"Exported {args.output} (torchscript, {vec_env.num_obs}->{vec_env.num_actions})")
 
 
 if __name__ == "__main__":

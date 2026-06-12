@@ -1,0 +1,24 @@
+============================================================
+  轨迹失败诊断报告
+============================================================
+
+CSV路径: /home/1ctnltug/Motrix3v3-simple-push/tests/fixtures/traj_push_no_progress.csv
+运行模式: fsm_mvp  帧数: 11  时长: 5.00s
+
+结论:
+  - 已进入 PUSH_FORWARD 状态。
+  - 但 PUSH 期间球未向球门方向有效推进。
+
+关键证据:
+  - ball_dist_min = 0.280m
+  - time_to_enter_0_5m = 1.50s
+  - ALIGN_BEHIND = 1.00s
+  - CHASE = 1.50s
+  - PUSH_FORWARD = 2.00s
+  - SEARCH = 0.50s
+  - align_mode ALIGN_FACE_GOAL = 0.50s
+  - align_mode CHASE = 1.50s
+  - align_mode PUSH_FORWARD = 2.00s
+
+建议:
+  1. PUSH 期间球未向球门推进：提高 push_vx 或检查推球方向

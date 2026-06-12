@@ -18,6 +18,10 @@
 
 import time
 
+from _source_path import ensure_source_path
+
+ensure_source_path()
+
 import numpy as np
 from absl import app, flags
 
