@@ -23,13 +23,13 @@ except ImportError:
     Node = object  # Fallback base class
 
 # Interfaces with other components
-import interfaces.action
-import interfaces.vision
-import configuration
-from trajectory import TrajectoryRecorder, default_trajectory_dir
+import docs.final_submission.decider.interfaces.action
+import docs.final_submission.decider.interfaces.vision
+import docs.final_submission.decider.configuration as configuration
+from docs.final_submission.decider.trajectory import TrajectoryRecorder, default_trajectory_dir
 
 # Import user_entry
-import user_entry
+import docs.final_submission.decider.user_entry as user_entry
 
 
 class Agent(Node):
@@ -44,8 +44,8 @@ class Agent(Node):
         self.logger = self.get_logger()
         self.logger.info("[Core] Initializing the core")
         self._config = configuration.load_config()
-        self._action = interfaces.action.Action(self)
-        self._vision = interfaces.vision.Vision(self)
+        self._action = docs.final_submission.decider.interfaces.action.Action(self)
+        self._vision = docs.final_submission.decider.interfaces.vision.Vision(self)
         self.logger.info("[Core] Core initialized. Calling user's init()")
 
         user_entry.init(self)
@@ -366,17 +366,17 @@ class SimAgent:
         self.logger.info(f"[SimCore] Final Robot ID: {self.id}")
         
         # Init ZMQ Client
-        from interfaces.sim_client import SimClient
+        from docs.final_submission.decider.interfaces.sim_client import SimClient
         self.client = SimClient(ip=ip, port=port)
         
         # Init Interfaces (mocking or adapting)
         # We need to tell them we are in simulation
-        self._action = interfaces.action.Action(self) 
-        self._vision = interfaces.vision.Vision(self)
+        self._action = docs.final_submission.decider.interfaces.action.Action(self) 
+        self._vision = docs.final_submission.decider.interfaces.vision.Vision(self)
         
         # [NEW] Integrate GameController and Communication
-        from interfaces.gamecontroller import GameController
-        from interfaces.communication import Communication
+        from docs.final_submission.decider.interfaces.gamecontroller import GameController
+        from docs.final_submission.decider.interfaces.communication import Communication
         self.gamecontroller = GameController(self)
         self.communication = Communication(self)
         

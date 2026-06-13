@@ -16,8 +16,9 @@ CUR_DIR = os.path.dirname(os.path.abspath(__file__))
 if CUR_DIR not in sys.path:
     sys.path.append(CUR_DIR)
 
-from logic.sub_statemachines import chase_ball, find_ball, go_back_to_field, dribble
-from logic.policy_statemachines import goalkeeper
+from docs.final_submission.decider.logic.sub_statemachines import chase_ball, dribble, find_ball
+from docs.final_submission.decider.logic.sub_statemachines import go_back_to_field
+from docs.final_submission.decider.logic.policy_statemachines import goalkeeper
 
 import csv
 from datetime import datetime

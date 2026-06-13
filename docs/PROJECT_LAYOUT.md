@@ -1,67 +1,95 @@
 # Project Layout
 
-这个仓库当前按“运行策略 + 仿真 + 训练 + 机器人资源”来理解会比较清楚。
+这个仓库按“比赛运行代码 + 仿真环境 + 训练环境 + 提交包/参考工程”来理解会比较清楚。根目录尽量只保留入口文件、运行配置、默认模型和一级功能目录。
 
-## 保留的主要目录
+## 主要运行目录
 
 - `decider/`
-  - 足球策略、决策逻辑和接口层。
-  - 体积很小，属于上层控制代码。
+  - 当前主要足球策略、决策逻辑和接口层。
+  - `tests/` 里的轨迹诊断测试会直接导入这里的脚本。
 
 - `simulation/motrixsim/`
   - 当前主要仿真运行目录。
   - 包含仿真入口、运行配置、机器人/场地资产和 policy 加载逻辑。
 
+- `scripts/`
+  - 根目录级启动脚本，例如启动仿真、决策器、比赛录制等。
+
+- `tests/`
+  - 仓库级测试和 fixtures。
+
+- `tools/`
+  - 一次性维护、诊断和校准脚本。
+  - 这些不是常规启动入口，但对调参和排查很有用。
+
+## 训练与资源目录
+
 - `MotrixLab/`
   - 强化学习训练代码。
-  - K1 训练环境在 `motrix_envs/src/motrix_envs/locomotion/k1/`。
+  - K1 训练环境在 `MotrixLab/motrix_envs/src/motrix_envs/locomotion/k1/`。
+  - `MotrixLab/.venv/`、`MotrixLab/runs/` 是本地产物，不应提交；需要释放空间时可以删除并重建/重跑。
+
+- `legged_gym/`
+  - 机器人资源、旧 policy 和兼容脚本。
+  - 训练配置中有硬编码路径会引用 `legged_gym/resources/robots/K1/k1_train_scene.xml`，运行配置也会引用 `legged_gym/policy/booster_k1/model_4700.onnx`，所以不要随便移动或删除。
 
 - `simulation/labbridge/`
   - 仿真桥接/管理相关代码。
-  - README 中仍有引用，暂时保留。
 
 - `simulation/isaac_sim/`
   - 旧 Isaac Sim 相关代码。
   - 不是当前主路径，但文档中仍作为历史/兼容模块出现，暂时保留。
 
-- `legged_gym/`
-  - 机器人资源、旧 policy 和一些兼容脚本。
-  - 训练配置中有硬编码路径会引用 `legged_gym/resources/robots/K1/k1_train_scene.xml`，运行配置也会引用 `legged_gym/policy/booster_k1/model_4700.onnx`，所以不要随便移动或删除。
+## 提交包和参考工程
+
+- `final_submission/`
+  - 比赛提交包整理区。
+  - `final_submission/decider/` 是提交版本的决策器副本，和根目录 `decider/` 不是同一个运行入口；同步前需要手动确认差异。
+  - `final_submission/gait/` 保存提交用步态模型。
+
+- `booster_train/`
+  - 外部/参考训练工程副本，目录内带独立 `.git/`。
+  - 当前根 `.gitignore` 会忽略这个目录的新变动，避免误提交参考工程杂项。
+
+- `robocup_demo/`
+  - 外部/参考 RoboCup demo 工程副本，目录内带独立 `.git/`。
+  - 当前根 `.gitignore` 会忽略这个目录的新变动，避免误提交参考工程杂项。
+
+## 文档目录
 
 - `docs/`
-  - 根目录原有的启动、训练、比赛和整理说明文档。
-  - 这些文件不参与运行，归档在这里方便根目录保持清爽。
+  - 启动、训练、比赛、Docker 和整理说明文档。
 
-- `tools/`
-  - 一次性维护/补丁脚本。
-  - 当前包含 `_patch_gait.py`，不是常规运行入口。
+- `README.md`
+  - 仓库主说明，保留最常用入口和快速启动信息。
 
 ## 根目录模型文件
 
 - `model_20000_new.onnx`
 - `model_4700.pt`
 
-这两个是当前运行配置里的默认 policy/model 路径之一，保留。
+这两个仍是当前运行配置里的默认 policy/model 路径之一，保持在根目录。移动它们需要同步修改 `simulation/motrixsim/app/runtime_config.py`、README 和启动文档。
 
-## 已清理的内容
+## 本地产物清理建议
 
-- `docx/`
-  - 微信文章离线清理工具/素材，和仿真训练主流程没有引用关系。
+已清理/可安全再生成：
 
-- `envs/`、`examples/`
-  - 早期 MotrixArena demo，未被当前 README、训练入口或 motrixsim 主路径引用。
+- `__pycache__/`
+- `.ruff_cache/`
+- `.pytest_cache/`
+- `.mypy_cache/`
+- `*.pyc`
 
-- `simulation/run.py`
-  - 旧入口，导入路径已经不匹配，并且文件末尾有异常字符。
+谨慎清理：
 
-- `MotrixLab/exported/`
-  - 空目录。
+- `MotrixLab/.venv/`
+  - 虚拟环境，删除后需要重新安装依赖。
 
-- `decider/requirements (copy).txt`
-  - 和 `decider/requirements.txt` 完全重复。
+- `MotrixLab/runs/`、`MotrixLab/top_runs/`
+  - 训练 checkpoint 和 TensorBoard 输出，删除前先确认不再需要。
 
-- `simulation/motrixsim/sim2sim_runner (copy).py`
-  - 早期模拟 runner，不是当前正式入口，末尾也有异常字符。
+- 嵌套 `.git/`
+  - `booster_train/.git/`、`robocup_demo/.git/` 属于参考工程自己的版本库元数据；如果只是节省空间，可以压缩或移出参考工程，但不要在不确认用途时直接删除。
 
 ## 常用入口
 

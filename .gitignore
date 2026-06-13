@@ -1,28 +1,37 @@
-# Python cache and compiled files
+# Python cache, test cache, and compiled files
 __pycache__/
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
 *.pyc
 *.pyo
 *.pyd
 .Python
 
-# Logs, generated debug output, and temporary archives
+# Logs, generated debug output, training output, and temporary archives
 logs/
 debug_logs/
 video/
+runs/
+top_runs/
 *.log
 *.zip
 *.bak
 *.old
 
 # Local/generated project copies and one-off materials
+booster_train/
 docx/
 examples/
 envs/
+robocup_demo/
 * (copy).*
 
 # Virtual environments and build outputs
 venv/
 .venv/
+htmlcov/
+.coverage
 *.egg-info/
 dist/
 build/
