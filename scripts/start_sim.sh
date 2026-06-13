@@ -43,7 +43,9 @@ echo "WebView:   http://localhost:5811"
 echo "ZMQ:       tcp://*:5555"
 echo ""
 
-exec uv run --directory "$REPO_ROOT/MotrixLab" python -u -m app.runner \
+exec uv run --directory "$REPO_ROOT/MotrixLab" \
+    --with absl-py --with pyzmq --with flask --with flask-socketio --with pillow \
+    python -u -m app.runner \
     --team-size "$TEAM_SIZE" \
     $REAL_TIME \
     $POLICY_ARG \

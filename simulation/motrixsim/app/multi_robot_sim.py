@@ -77,7 +77,7 @@ from .runtime_config import (
     build_action_scale_array,
     parse_param_for_joint_names,
 )
-from .soccer_referee import MujocoSoccerReferee
+from .soccer_referee import GCSetPlay, MujocoSoccerReferee
 from .webview_server import MujocoLabWebView
 
 
@@ -402,6 +402,7 @@ DRAG_CMD_ZERO_POLICY_FRAMES = 5
 FALL_RESET_PROTECT_SEC = 1.5
 FALL_UPRIGHT_DOT_MIN = 0.2
 FALL_CONFIRM_FRAMES = 10
+KICKOFF_RESET_PROTECT_SEC = 1.0
 
 # Extra root height when instantiating robots in the merged scene (meters).
 # Helps avoid initial penetrations with non-planar or thick floor collision (e.g. mesh stadium).
@@ -2832,6 +2833,45 @@ class MultiRobotMotrixSim:
             changed = True
         return changed
 
+    def _kickoff_y_positions(self, center_y: float, count: int) -> list[float]:
+        if count <= 0:
+            return []
+        half_w = 0.5 * float(self._field_width)
+        margin = min(0.6, half_w * 0.35)
+        usable = max(0.0, float(self._field_width) - 2.0 * margin)
+        spacing = 0.0 if count == 1 else min(0.8, usable / float(count - 1))
+        first = float(center_y) - 0.5 * spacing * float(count - 1)
+        lo = -half_w + margin
+        hi = half_w - margin
+        return [float(np.clip(first + spacing * i, lo, hi)) for i in range(count)]
+
+    def _reset_robots_for_kickoff(self, ball_x: float, ball_y: float):
+        half_l = 0.5 * float(self._field_length)
+        margin_x = min(0.6, half_l * 0.35)
+        side_offset = min(max(0.9, 0.14 * float(self._field_length)), max(0.9, half_l - margin_x))
+        teams = (
+            ("red", [rid for rid in self.active_robot_ids if rid < MAX_ROBOTS_PER_TEAM], -1.0, 0.0),
+            ("blue", [rid for rid in self.active_robot_ids if rid >= MAX_ROBOTS_PER_TEAM], 1.0, math.pi),
+        )
+        now = time.monotonic()
+        for _team, rids, x_sign, yaw in teams:
+            rids = [rid for rid in sorted(rids) if rid in self.robot_specs]
+            if not rids:
+                continue
+            target_x = float(ball_x) + x_sign * side_offset
+            target_x = float(np.clip(target_x, -half_l + margin_x, half_l - margin_x))
+            ys = self._kickoff_y_positions(ball_y, len(rids))
+            for rid, y in zip(rids, ys):
+                spec = self.robot_specs[rid]
+                self._robot_protect_pose[rid] = (target_x, y, yaw)
+                self._robot_protect_until[rid] = now + KICKOFF_RESET_PROTECT_SEC
+                self._robot_cmd_zero_frames_left[rid] = max(
+                    int(self._robot_cmd_zero_frames_left.get(rid, 0)),
+                    DRAG_CMD_ZERO_POLICY_FRAMES,
+                )
+                self._hold_robot_at_reset_pose(spec, target_x, y, yaw)
+        self.model.forward_kinematic(self.data)
+
     def _update_referee(self, dt: float):
         if self.referee is None:
             return
@@ -2847,6 +2887,8 @@ class MultiRobotMotrixSim:
         place = self.referee.consume_ball_place()
         if place is not None:
             self.teleport_ball(float(place[0]), float(place[1]), None)
+            if self.referee.set_play == GCSetPlay.KICK_OFF:
+                self._reset_robots_for_kickoff(float(place[0]), float(place[1]))
 
     def _get_ball_state(self):
         if self._ball_qpos_adr is None or self._ball_qvel_adr is None:

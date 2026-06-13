@@ -37,7 +37,9 @@ echo "ID:     $ROBOT_ID"
 echo "Target: tcp://$IP:$PORT"
 echo ""
 
-exec uv run --directory "$REPO_ROOT/MotrixLab" python -u "$REPO_ROOT/decider/decider.py" \
+exec uv run --directory "$REPO_ROOT/MotrixLab" \
+    --with pyyaml --with pyzmq --with transitions --with matplotlib \
+    python -u "$REPO_ROOT/decider/decider.py" \
     --simulation \
     --ip "$IP" \
     --port "$PORT" \
