@@ -477,11 +477,14 @@ class PushToGoalController:
 
 
 class ContinuousPushController:
-    """Continuous error-space controller — no FSM states, no mode switches.
+    """Continuous error-space controller with 5-mode alignment system.
 
-    Five error terms computed every frame, blended through a sigmoid
-    distance-dependent weight.  Far from the ball → approach behaviour;
-    near the ball → behind-depth / lateral / yaw alignment → push to goal.
+    APPROACH → TURN_ONLY → ORBIT_BEHIND → LATERAL_ALIGN → ALIGN_PUSH
+
+    Far from the ball: approach the behind-ball target (APPROACH).
+    Near ball but not in position: orbit behind / lateral align.
+    Well-aligned behind ball: push toward goal (ALIGN_PUSH) with
+    feed-forward speed + depth-error P-control.
 
     Key invariants:
       - behind_depth = dot(ball - robot, to_goal)  →  positive == robot
@@ -490,31 +493,52 @@ class ContinuousPushController:
         the body frame before composing with cmd_x / cmd_y.
       - vy and w are soft-clipped with tanh to prevent long-duration
         command saturation.
+      - No auto-kick.  can_kick_candidate is recorded as a diagnostic
+        and a KICK_CANDIDATE log fires when geometry-ready + near-goal.
     """
 
     # ------------------------------------------------------------------
     # Tunable parameters (can be overridden via config.yaml)
     # ------------------------------------------------------------------
     _DEFAULTS = {
-        "k_approach": 0.5,          # approach P-gain (vx ∝ ball distance when far)
+        "k_approach": 0.7,          # approach P-gain (vx ∝ ball distance when far)
         "k_depth": 2.0,             # behind-depth P-gain
         "k_lat": 1.5,               # lateral error P-gain
         "k_yaw": 1.8,               # yaw error P-gain
         "k_sideline": 1.2,          # sideline repulsion gain
 
         "target_behind": 0.15,      # desired metres behind ball (along to_goal)
-        "d_transition": 1.0,        # ball distance at 50/50 blend (metres)
-        "d_scale": 0.4,             # sigmoid steepness
 
         "vx_max_approach": 0.9,     # max approach vx when far (unitless)
-        "vx_max_push": 0.8,         # max push vx when near
         "vx_max_push_rev": 0.2,     # max reverse speed when too close
         "vy_max": 0.7,              # lateral velocity cap
         "w_max": 1.5,               # angular velocity cap
 
         "sideline_margin": 0.8,     # metres from sideline where repulsion starts
         "soft_clip_threshold": 0.7, # vy / w soft-clip entry point
+
+        "near_ball_dist": 0.45,         # ball distance threshold for near-ball modes
+        "turn_only_angle_deg": 35,      # |ball_angle| above this → TURN_ONLY
+        "max_push_speed_near_ball": 0.05,  # vx cap during ORBIT_BEHIND
+        "max_candidate_speed": 0.35,    # speed threshold for can_kick_candidate
+
+        "lateral_align_upper": 0.25,        # lateral_err above this -> ORBIT_BEHIND recovery
+        "lateral_orbit_exit": 0.18,         # exit ORBIT_BEHIND -> LATERAL_ALIGN below this
+        "lateral_align_vx_max": 0.20,       # max vx during LATERAL_ALIGN
+        "align_push_vx_max": 0.35,          # max vx during ALIGN_PUSH when ready
+        "align_push_unready_vx_max": 0.18,  # max vx during ALIGN_PUSH when not ready
+        "push_speed_base": 0.15,            # feed-forward forward speed in ALIGN_PUSH (m/s in cmd space)
+
+        "approach_guard_ball_dist": 0.90,   # enable APPROACH guard below this distance
+        "approach_guard_speed": 0.45,       # enable APPROACH guard above this planar speed
+        "approach_guard_vx_max": 0.35,      # guarded APPROACH forward cap
+        "approach_guard_vy_max": 0.35,      # guarded APPROACH lateral cap
+        "approach_guard_w_max": 0.60,       # guarded APPROACH angular cap
     }
+
+    # Internal diagnostic thresholds (not configurable)
+    _LATERAL_ALIGNED_THRESHOLD = 0.18    # metres, lateral_err below this = aligned
+    _FACING_GOAL_THRESHOLD_DEG = 20.0    # degrees, yaw_err below this = facing goal
 
     def __init__(self, agent):
         self.agent = agent
@@ -534,17 +558,11 @@ class ContinuousPushController:
         # Diagnostics (read by _record_trajectory)
         self._last_errors = {}
         self._last_cmd = (0.0, 0.0, 0.0)
+        self._align_mode = None          # track current mode for transition detection
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def _sigmoid(x):
-        """Sigmoid 1/(1+exp(-x))."""
-        # Clamp input to avoid overflow
-        x = max(-20.0, min(20.0, x))
-        return 1.0 / (1.0 + math.exp(-x))
 
     @staticmethod
     def _soft_clip(value, threshold):
@@ -577,10 +595,284 @@ class ContinuousPushController:
         )
 
     # ------------------------------------------------------------------
-    # Error computation
+    # Diagnostic helpers (read-only, do not affect control output)
     # ------------------------------------------------------------------
 
-    def _compute_errors(self, ball_w, robot_w, robot_yaw_rad, goal):
+    def _is_behind_ball(self, err):
+        """True when robot is between ball and own goal.
+
+        behind_depth = dot(ball_w - robot_w, to_goal_unit).
+        to_goal_unit points from ball toward opponent goal.
+        Positive behind_depth means the robot projects behind the ball
+        on the ball-to-goal axis — i.e. the robot is on the own-goal side
+        of the ball, ready to push toward the opponent goal.
+        """
+        return err.get("behind_depth", 0.0) > 0.0
+
+    def _is_laterally_aligned(self, err):
+        """True when lateral error is within the alignment threshold."""
+        return abs(err.get("lateral_err", 0.0)) < self._LATERAL_ALIGNED_THRESHOLD
+
+    def _is_facing_goal(self, err):
+        """True when yaw error is within the facing-goal threshold."""
+        return abs(err.get("yaw_err_deg", 0.0)) < self._FACING_GOAL_THRESHOLD_DEG
+
+    def _compute_can_kick_candidate(self, err, robot_speed, is_behind, is_lat, is_facing):
+        """Return (bool, reason) for can_kick_candidate.
+
+        True only when ALL conditions hold:
+          - is_behind_ball
+          - is_laterally_aligned
+          - is_facing_goal
+          - ball_dist < near_ball_dist
+          - robot_speed < max_candidate_speed
+        """
+        if not is_behind:
+            return False, "not_behind"
+        if not is_lat:
+            return False, "lateral_error"
+        if not is_facing:
+            return False, "not_facing_goal"
+        if err.get("ball_dist", 999.0) >= self.near_ball_dist:
+            return False, "too_far"
+        if robot_speed >= self.max_candidate_speed:
+            return False, "too_fast"
+        return True, "ok"
+
+    # ------------------------------------------------------------------
+    # Mode system (Commit 2 — replaces sigmoid blend)
+    # ------------------------------------------------------------------
+
+    def _determine_mode(self, err, ball_angle_deg):
+        """Return the active alignment mode by priority.
+
+        APPROACH:       ball is far -> navigate toward behind-ball target.
+        TURN_ONLY:      near ball but ball not in front -> rotate in place.
+        ORBIT_BEHIND:   near ball but not behind, or behind with large
+                        lateral error (lat >= lateral_align_upper).
+        LATERAL_ALIGN:  behind ball with moderate lateral error
+                        (0.18 <= lat < lateral_align_upper).
+        ALIGN_PUSH:     behind ball, well-aligned (lat < 0.18).
+
+        Hysteresis: when prev_mode is ORBIT_BEHIND, stay in ORBIT_BEHIND
+        until lateral error drops below lateral_orbit_exit (0.18).
+        """
+        if err.get("ball_dist", 999.0) >= self.near_ball_dist:
+            return "APPROACH"
+        if abs(ball_angle_deg) > self.turn_only_angle_deg:
+            return "TURN_ONLY"
+        if not self._is_behind_ball(err):
+            return "ORBIT_BEHIND"
+
+        # Behind ball -- use lateral error with hysteresis
+        lat = abs(err.get("lateral_err", 0.0))
+        prev = self._align_mode
+
+        if prev == "ORBIT_BEHIND":
+            return "LATERAL_ALIGN" if lat < self.lateral_orbit_exit else "ORBIT_BEHIND"
+
+        if prev == "LATERAL_ALIGN":
+            if lat < self._LATERAL_ALIGNED_THRESHOLD:
+                return "ALIGN_PUSH"
+            if lat >= self.lateral_align_upper:
+                return "ORBIT_BEHIND"
+            return "LATERAL_ALIGN"
+
+        # Fresh determination (prev is None, APPROACH, TURN_ONLY, or ALIGN_PUSH)
+        if lat >= self.lateral_align_upper:
+            return "ORBIT_BEHIND"
+        if lat >= self._LATERAL_ALIGNED_THRESHOLD:
+            return "LATERAL_ALIGN"
+        return "ALIGN_PUSH"
+
+    def _should_reset_cmd(self, prev_mode, new_mode):
+        """Return True if _last_cmd cache should be cleared on this transition."""
+        reset_pairs = {
+            ("APPROACH", "TURN_ONLY"),
+            ("APPROACH", "ORBIT_BEHIND"),
+            ("ORBIT_BEHIND", "ALIGN_PUSH"),
+            ("LATERAL_ALIGN", "ALIGN_PUSH"),
+        }
+        return (prev_mode, new_mode) in reset_pairs
+
+    def _compute_approach_commands(self, err, ball_w, robot_w, robot_yaw_rad):
+        """Compute (vx, vy, w) for APPROACH mode.
+
+        Navigate toward a target behind the ball on the ball-to-goal line.
+        Preserves the existing far-field behaviour: P-control in body frame
+        with sideline repulsion.
+        """
+        d_ball = err["ball_dist"]
+        goal_dist = err["dist_to_goal"]
+        c = math.cos(robot_yaw_rad)
+        s = math.sin(robot_yaw_rad)
+
+        # Smoothly shift target from ball (far) to behind-ball (near threshold)
+        if d_ball < 1.0:
+            behind_ratio = (1.0 - d_ball) / max(1.0 - self.near_ball_dist, 1e-6)
+            behind_ratio = max(0.0, min(1.0, behind_ratio))
+        else:
+            behind_ratio = 0.0
+
+        approach_target = ball_w - err["to_goal_unit"] * (self.target_behind * behind_ratio)
+        target_delta = approach_target - robot_w
+        target_body_x = float(target_delta[0] * c + target_delta[1] * s)
+        target_body_y = float(-target_delta[0] * s + target_delta[1] * c)
+
+        vx = float(np.clip(
+            self.k_approach * target_body_x,
+            -self.vx_max_push_rev,
+            self.vx_max_approach,
+        ))
+
+        vy = float(np.clip(
+            self.k_approach * target_body_y,
+            -self.vy_max, self.vy_max,
+        ))
+        world_repulsion_y = float(err["sideline_repulsion_y"] * self.k_sideline)
+        body_rep_x = world_repulsion_y * s
+        body_rep_y = world_repulsion_y * c
+        near_goal_factor = float(np.clip((goal_dist - 2.0) / 4.0, 0.0, 1.0))
+        vy = float(np.clip(vy + body_rep_y * near_goal_factor, -self.vy_max, self.vy_max))
+
+        w = float(np.clip(
+            self.k_yaw * err["yaw_err_rad"],
+            -self.w_max, self.w_max,
+        ))
+
+        vx = float(np.clip(vx + body_rep_x * 0.2 * near_goal_factor, -0.3, 1.0))
+        vy = self._soft_clip(vy, self.soft_clip_threshold)
+        w = self._soft_clip(w, self.soft_clip_threshold)
+
+        # Record raw input before guard for diagnostics
+        self._approach_guard_input = (vx, vy, w)
+        vx, vy, w, self._approach_guard_applied = self._apply_approach_guard(vx, vy, w, d_ball)
+
+        return vx, vy, w, body_rep_x
+
+    def _apply_approach_guard(self, vx, vy, w, d_ball):
+        """Apply APPROACH guard caps when near ball or moving fast.
+
+        Returns (vx, vy, w, applied) where applied is True if the guard
+        engaged (values were clamped).
+        """
+        if (
+            d_ball < self.approach_guard_ball_dist
+            or math.hypot(vx, vy) > self.approach_guard_speed
+        ):
+            vx = float(np.clip(vx, -self.vx_max_push_rev, self.approach_guard_vx_max))
+            vy = float(np.clip(vy, -self.approach_guard_vy_max, self.approach_guard_vy_max))
+            w = float(np.clip(w, -self.approach_guard_w_max, self.approach_guard_w_max))
+            return vx, vy, w, True
+        return vx, vy, w, False
+
+    def _compute_turn_only_commands(self, ball_angle_deg):
+        """Compute (vx, vy, w) for TURN_ONLY mode.
+
+        Zero linear velocity; only rotate toward the ball.
+        """
+        ball_angle_rad = math.radians(ball_angle_deg)
+        w = float(np.clip(
+            self.k_yaw * ball_angle_rad,
+            -self.w_max, self.w_max,
+        ))
+        return 0.0, 0.0, w, 0.0
+
+    def _compute_orbit_behind_commands(self, err):
+        """Compute (vx, vy, w) for ORBIT_BEHIND mode.
+
+        Near ball but not in position.  Forward speed capped to avoid
+        bumping the ball away.  Lateral and yaw controls work to orbit
+        behind the ball and align.
+        """
+        depth_err = err["behind_depth"] - self.target_behind
+        vx = float(np.clip(
+            self.k_depth * depth_err,
+            -self.max_push_speed_near_ball,
+            self.max_push_speed_near_ball,
+        ))
+        vy = float(np.clip(
+            -self.k_lat * err["lateral_err"],
+            -self.vy_max, self.vy_max,
+        ))
+        w = float(np.clip(
+            self.k_yaw * err["yaw_err_rad"],
+            -self.w_max, self.w_max,
+        ))
+        vy = self._soft_clip(vy, self.soft_clip_threshold)
+        w = self._soft_clip(w, self.soft_clip_threshold)
+        return vx, vy, w, 0.0
+
+    def _compute_lateral_align_commands(self, err):
+        """Compute (vx, vy, w) for LATERAL_ALIGN mode.
+
+        Behind ball with moderate lateral error.  Forward speed is tightly
+        capped to avoid bumping the ball off-line.  Lateral and yaw
+        corrections work to reduce lateral error and align to the goal.
+        """
+        depth_err = err["behind_depth"] - self.target_behind
+        vx = float(np.clip(
+            self.k_depth * depth_err,
+            -self.lateral_align_vx_max,
+            self.lateral_align_vx_max,
+        ))
+        vy = float(np.clip(
+            -self.k_lat * err["lateral_err"],
+            -self.vy_max, self.vy_max,
+        ))
+        w = float(np.clip(
+            self.k_yaw * err["yaw_err_rad"],
+            -self.w_max, self.w_max,
+        ))
+        vy = self._soft_clip(vy, self.soft_clip_threshold)
+        w = self._soft_clip(w, self.soft_clip_threshold)
+        return vx, vy, w, 0.0
+
+    def _compute_align_push_commands(self, err):
+        """Compute (vx, vy, w) for ALIGN_PUSH mode.
+
+        Behind ball with good geometry.  Feed-forward push speed plus
+        depth-error correction, lateral and yaw corrections.
+        Soft-clip vy and w to prevent command saturation.
+
+        is_ready is based purely on geometry (removed the hypot speed
+        check that caused a trap: larger behind_depth → higher vx_ready
+        → hypot ≥ max_candidate_speed → vx capped at unready value).
+        """
+        depth_err = err["behind_depth"] - self.target_behind
+
+        is_ready = (  # geometry-only check
+            self._is_behind_ball(err)
+            and self._is_laterally_aligned(err)
+            and self._is_facing_goal(err)
+            and err.get("ball_dist", 999.0) < self.near_ball_dist
+        )
+
+        vy = float(np.clip(
+            -self.k_lat * err["lateral_err"],
+            -self.vy_max, self.vy_max,
+        ))
+        w_raw = self.k_yaw * err["yaw_err_rad"]
+        w_damping = 0.3 + 0.7 * float(
+            np.clip((err["ball_dist"] - 0.3) / 0.5, 0.0, 1.0)
+        )
+        w = float(np.clip(w_raw * w_damping, -self.w_max, self.w_max))
+        vy = self._soft_clip(vy, self.soft_clip_threshold)
+        w = self._soft_clip(w, self.soft_clip_threshold)
+
+        vx_upper = self.align_push_vx_max if is_ready else self.align_push_unready_vx_max
+
+        # Feed-forward push speed + P-control on behind-depth.
+        # push_speed_base ensures the robot keeps pushing even when
+        # behind_depth ≈ target_behind (depth_err → 0).
+        vx = float(np.clip(
+            self.push_speed_base + self.k_depth * depth_err,
+            -self.vx_max_push_rev,
+            vx_upper,
+        ))
+        return vx, vy, w, 0.0
+
+    def _compute_errors(self, ball_w, robot_w, robot_yaw_rad, goal, ball_local=None):
         """Return a dict with all five error terms plus derived geometry."""
         # -- ball → goal direction --
         to_goal = goal - ball_w
@@ -623,6 +915,11 @@ class ContinuousPushController:
         else:
             sideline_repulsion_y = 0.0
 
+        # -- ball angle in robot body frame (for TURN_ONLY detection) --
+        ball_angle_deg = 0.0
+        if ball_local is not None and ball_local[0] is not None and ball_local[1] is not None:
+            ball_angle_deg = math.degrees(math.atan2(float(ball_local[1]), float(ball_local[0])))
+
         return {
             "behind_depth": behind_depth,
             "lateral_err": lateral_err,
@@ -633,6 +930,7 @@ class ContinuousPushController:
             "sideline_risk": sideline_risk,
             "sideline_repulsion_y": sideline_repulsion_y,
             "dist_to_goal": dist_to_goal,
+            "ball_angle_deg": ball_angle_deg,
         }
 
     # ------------------------------------------------------------------
@@ -664,92 +962,83 @@ class ContinuousPushController:
         goal = np.array([self.field_length / 2.0, 0.0], dtype=float)
 
         # --- 2. Compute all errors ---
-        err = self._compute_errors(ball_w, robot_w, robot_yaw_rad, goal)
+        ball_local = self.agent.get_ball_pos()
+        err = self._compute_errors(ball_w, robot_w, robot_yaw_rad, goal, ball_local)
         d_ball = err["ball_dist"]
         goal_dist = err["dist_to_goal"]
 
-        # --- 3. Distance-dependent blend ---
-        alpha = self._sigmoid((d_ball - self.d_transition) / self.d_scale)
-        # alpha → 0  near ball (push regime)
-        # alpha → 1  far from ball (approach regime)
-        w_near = 1.0 - alpha   # push / alignment weight
-        w_far = alpha           # approach / chase weight
+        # --- 3. Determine active mode ---
+        ball_angle_deg = err["ball_angle_deg"]
+        prev_mode = self._align_mode
+        align_mode = self._determine_mode(err, ball_angle_deg)
+        self._align_mode = align_mode
 
-        # Continuous target: far away, move to the ball; near the ball,
-        # drift toward the ball-behind point.  Convert world error to body
-        # frame so approach works regardless of robot heading.
-        approach_target = ball_w - err["to_goal_unit"] * (self.target_behind * w_near)
-        target_delta = approach_target - robot_w
-        c = math.cos(robot_yaw_rad)
-        s = math.sin(robot_yaw_rad)
-        target_body_x = float(target_delta[0] * c + target_delta[1] * s)
-        target_body_y = float(-target_delta[0] * s + target_delta[1] * c)
+        # --- 4. Conditional command cache reset ---
+        if self._should_reset_cmd(prev_mode, align_mode):
+            self.logger.debug(
+                f"[ContPush] Mode transition {prev_mode}->{align_mode}: "
+                "resetting command cache."
+            )
+            self._last_cmd = (0.0, 0.0, 0.0)
 
-        # --- 4. VX — forward velocity ---
-        # Far: navigate toward the continuous target in body frame.
-        vx_approach = float(np.clip(
-            self.k_approach * target_body_x,
-            -self.vx_max_push_rev,
-            self.vx_max_approach,
-        ))
+        # --- 5. Mode-specific command computation ---
+        self._approach_guard_input = (None, None, None)
+        self._approach_guard_applied = False
 
-        # Near: behind-depth P-control.
-        depth_err_vx = err["behind_depth"] - self.target_behind
-        vx_push = float(np.clip(
-            self.k_depth * depth_err_vx,
-            -self.vx_max_push_rev,
-            self.vx_max_push,
-        ))
+        if align_mode == "APPROACH":
+            vx, vy, w, _body_rep_x = self._compute_approach_commands(
+                err, ball_w, robot_w, robot_yaw_rad
+            )
+        elif align_mode == "TURN_ONLY":
+            vx, vy, w, _body_rep_x = self._compute_turn_only_commands(ball_angle_deg)
+        elif align_mode == "ORBIT_BEHIND":
+            vx, vy, w, _body_rep_x = self._compute_orbit_behind_commands(err)
+        elif align_mode == "LATERAL_ALIGN":
+            vx, vy, w, _body_rep_x = self._compute_lateral_align_commands(err)
+        elif align_mode == "ALIGN_PUSH":
+            vx, vy, w, _body_rep_x = self._compute_align_push_commands(err)
+        else:
+            vx, vy, w, _body_rep_x = 0.0, 0.0, 0.0
 
-        # Scale forward push by alignment quality — don't rush if badly misaligned.
-        alignment_factor = max(0.3, 1.0 - abs(err["yaw_err_rad"]) / math.pi)
-        # Blend near / far
-        vx_raw = w_near * vx_push * alignment_factor + w_far * vx_approach
-        vx = float(np.clip(vx_raw, -0.3, 1.0))
-
-        # --- 5. VY — lateral correction + sideline repulsion ---
-        vy_approach = float(np.clip(self.k_approach * target_body_y, -self.vy_max, self.vy_max))
-        vy_lat = float(np.clip(-self.k_lat * err["lateral_err"], -self.vy_max, self.vy_max))
-
-        # Sideline repulsion: push toward field centre (Y=0) in WORLD frame,
-        # then rotate into body frame before adding to cmd_x / cmd_y.
-        world_repulsion_y = float(err["sideline_repulsion_y"] * self.k_sideline)
-        # Rotate world repulsion [0, world_repulsion_y] into body frame.
-        body_rep_x = world_repulsion_y * s   # from vx = wx*cos+wy*sin, wx=0
-        body_rep_y = world_repulsion_y * c   # from vy = -wx*sin+wy*cos, wx=0
-
-        # Fade sideline repulsion near goal (don't push away from goal line).
-        near_goal_factor = float(np.clip((goal_dist - 2.0) / 4.0, 0.0, 1.0))
-        body_rep_x *= near_goal_factor
-        body_rep_y *= near_goal_factor
-
-        vy = w_far * vy_approach + w_near * vy_lat + body_rep_y
-        vy = float(np.clip(vy, -self.vy_max, self.vy_max))
-
-        # --- 6. W — yaw control with near-ball damping ---
-        w_raw = self.k_yaw * err["yaw_err_rad"]
-        w_damping = 0.3 + 0.7 * float(
-            np.clip((d_ball - 0.3) / 0.5, 0.0, 1.0)
+        # --- 6. Compute diagnostic fields ---
+        robot_speed = math.hypot(vx, vy)
+        is_behind = self._is_behind_ball(err)
+        is_lat = self._is_laterally_aligned(err)
+        is_facing = self._is_facing_goal(err)
+        can_kick, kick_reason = self._compute_can_kick_candidate(
+            err, robot_speed, is_behind, is_lat, is_facing
         )
-        w = float(np.clip(w_raw * w_damping, -self.w_max, self.w_max))
 
-        # --- 7. Anti-saturation soft-clip (vy, w only; vx stays linear) ---
-        vy = self._soft_clip(vy, self.soft_clip_threshold)
-        w = self._soft_clip(w, self.soft_clip_threshold)
+        # --- 6b. Kick-candidate log (diagnostic only — no auto-kick) ---
+        if can_kick and err.get("dist_to_goal", 999.0) < 3.0:
+            self.logger.info(
+                f"[ContPush] KICK_CANDIDATE dist_to_goal={err['dist_to_goal']:.1f} "
+                f"ball_dist={d_ball:.2f} mode={align_mode}"
+            )
 
-        # --- 8. Apply sideline repulsion vx component ---
-        vx = float(np.clip(vx + body_rep_x * 0.2, -0.3, 1.0))
-        # Only a fraction (0.2x) so forward push dominates.
-
-        # --- 9. Store diagnostics ---
-        self._last_errors = err
+        # --- 7. Store diagnostics ---
+        gvx, gvy, gvw = self._approach_guard_input
+        self._last_errors = {
+            **err,
+            "align_mode": align_mode,
+            "is_behind_ball": is_behind,
+            "is_laterally_aligned": is_lat,
+            "is_facing_goal": is_facing,
+            "robot_speed": robot_speed,
+            "can_kick_candidate": can_kick,
+            "can_kick_reason": kick_reason,
+            "approach_guard_input_vx": gvx,
+            "approach_guard_input_vy": gvy,
+            "approach_guard_input_w": gvw,
+            "approach_guard_applied": self._approach_guard_applied,
+        }
         self._last_cmd = (vx, vy, w)
 
-        # --- 10. Issue command ---
+        # --- 8. Issue command ---
         distance_info = (
-            f"d_ball={d_ball:.2f} alpha={alpha:.2f} "
+            f"d_ball={d_ball:.2f} mode={align_mode} "
             f"behind={err['behind_depth']:.3f} lat={err['lateral_err']:.3f} "
-            f"yaw={err['yaw_err_deg']:.1f}deg sideline={err['sideline_risk']:.2f}"
+            f"yaw={err['yaw_err_deg']:.1f}deg"
         )
         self.logger.debug(f"[ContPush] {distance_info} → cmd=({vx:.2f},{vy:.2f},{w:.2f})")
 

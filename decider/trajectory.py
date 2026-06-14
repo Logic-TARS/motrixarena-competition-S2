@@ -23,6 +23,7 @@ TRAJECTORY_FIELDS = [
     "robot_x",
     "robot_y",
     "robot_yaw_deg",
+    "is_fallen",
     "ball_x",
     "ball_y",
     "ball_z",
@@ -45,6 +46,17 @@ TRAJECTORY_FIELDS = [
     "can_kick",
     "can_kick_reason",
     "kick_push",
+    # Alignment-pipeline diagnostic fields
+    "is_behind_ball",
+    "is_laterally_aligned",
+    "is_facing_goal",
+    "robot_speed",
+    "can_kick_candidate",
+    "ball_angle_deg",
+    "approach_guard_input_vx",
+    "approach_guard_input_vy",
+    "approach_guard_input_w",
+    "approach_guard_applied",
 ]
 
 

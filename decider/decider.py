@@ -487,6 +487,13 @@ class SimAgent:
         self._trajectory_last_perf = now_perf
         sim_state = response.get("state", {})
         ball_state = sim_state.get("ball", {})
+        robot_state = {}
+        robot_id = int(self._config.get("id", 0))
+        sim_robot_id = int(getattr(self, "id", robot_id))
+        for item in sim_state.get("robots", []):
+            if isinstance(item, dict) and int(item.get("id", -1)) == sim_robot_id:
+                robot_state = item
+                break
         robot_pos = self.get_self_pos()
         ball_pos = self.get_ball_pos_in_map()
         ball_local = self.get_ball_pos()
@@ -506,12 +513,13 @@ class SimAgent:
                 else "continuous_push"
             ),
             "team": self.color,
-            "robot_id": self._config.get("id", 0),
+            "robot_id": robot_id,
             "field_length": self._active_field_length,
             "field_width": self._active_field_width,
             "robot_x": robot_pos[0] if robot_pos is not None else None,
             "robot_y": robot_pos[1] if robot_pos is not None else None,
             "robot_yaw_deg": self.get_self_yaw(),
+            "is_fallen": robot_state.get("is_fallen", False),
             "ball_x": ball_pos[0] if ball_pos is not None else None,
             "ball_y": ball_pos[1] if ball_pos is not None else None,
             "ball_z": ball_state.get("z"),
@@ -534,12 +542,23 @@ class SimAgent:
             "distance_to_goal": errors.get("dist_to_goal"),
             # FSM-related fields (no FSM in continuous controller)
             "fsm_state": "",
-            "align_mode": "",
+            "align_mode": errors.get("align_mode", ""),
             "side_recovery_phase": "",
             "state_duration_s": None,
-            # Kick readiness (not active in push-only mode)
+            # Alignment-pipeline diagnostics
+            "is_behind_ball": errors.get("is_behind_ball", ""),
+            "is_laterally_aligned": errors.get("is_laterally_aligned", ""),
+            "is_facing_goal": errors.get("is_facing_goal", ""),
+            "robot_speed": errors.get("robot_speed", ""),
+            "can_kick_candidate": errors.get("can_kick_candidate", ""),
+            "ball_angle_deg": errors.get("ball_angle_deg", ""),
+            "approach_guard_input_vx": errors.get("approach_guard_input_vx", ""),
+            "approach_guard_input_vy": errors.get("approach_guard_input_vy", ""),
+            "approach_guard_input_w": errors.get("approach_guard_input_w", ""),
+            "approach_guard_applied": errors.get("approach_guard_applied", False),
+            # Kick readiness
             "can_kick": False,
-            "can_kick_reason": "",
+            "can_kick_reason": errors.get("can_kick_reason", ""),
             "kick_push": False,
         }
         recorder.write(row)
