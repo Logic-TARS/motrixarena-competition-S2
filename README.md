@@ -95,7 +95,6 @@ motrixarena-competition-S2/
 ├── MotrixLab/                 # K1 locomotion / RL 训练子项目
 ├── models/k1/                 # 默认 K1 policy 模型
 ├── docs/                      # 启动、训练、比赛文档
-├── submission/final/          # 比赛最终提交包副本
 ├── tools/                     # 维护脚本
 └── scripts/                   # 常用启动和录制脚本
 ```
@@ -226,7 +225,6 @@ http://127.0.0.1:8000/
 ├── MotrixLab/                 # RL 训练子项目
 ├── models/k1/                 # 默认策略模型
 ├── docs/                      # 文档
-├── submission/final/          # 比赛最终提交包副本
 ├── tools/                     # 工具脚本
 └── scripts/                   # 常用启动和录制脚本
 ```

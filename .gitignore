@@ -14,6 +14,8 @@ debug_logs/
 video/
 runs/
 top_runs/
+MotrixLab/exported/
+submission/
 *.log
 *.zip
 *.bak
