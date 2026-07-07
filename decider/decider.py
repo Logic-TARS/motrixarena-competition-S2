@@ -296,6 +296,25 @@ class SimAgent:
                     raise ValueError("--sim-fixed-cmd must be formatted as vx,vy,w")
                 self.sim_fixed_cmd = [float(p) for p in parts]
                 self.sim_fixed_cmd = [float(np.clip(v, -1.0, 1.0)) for v in self.sim_fixed_cmd]
+            self.sim_fixed_cmd_seq = None
+            self._seq_idx = 0
+            self._seq_elapsed = 0.0
+            if hasattr(args, "sim_fixed_cmd_seq") and args.sim_fixed_cmd_seq:
+                import json
+                raw = str(args.sim_fixed_cmd_seq)
+                if raw.startswith("@"):
+                    with open(raw[1:], "r") as _f:
+                        seq = json.load(_f)
+                else:
+                    seq = json.loads(raw)
+                self.sim_fixed_cmd_seq = []
+                for entry in seq:
+                    cmd = [float(np.clip(v, -1.0, 1.0)) for v in entry["cmd"]]
+                    self.sim_fixed_cmd_seq.append({
+                        "cmd": cmd,
+                        "duration_s": float(entry["duration_s"]),
+                    })
+                self.sim_fixed_cmd = None  # seq overrides fixed cmd
             trajectory_enabled = bool(
                 getattr(args, "record_trajectory", False)
                 or getattr(args, "trajectory_dir", None)
@@ -423,10 +442,19 @@ class SimAgent:
             try:
                 loop_start = time.perf_counter()
                 # 1. User Loop (Think), or fixed command for locomotion debugging.
-                if self.sim_fixed_cmd is None:
-                    user_entry.loop(self)
-                else:
+                if self.sim_fixed_cmd is not None:
                     self.current_cmd = list(self.sim_fixed_cmd)
+                elif self.sim_fixed_cmd_seq is not None:
+                    seq_entry = self.sim_fixed_cmd_seq[self._seq_idx]
+                    self.current_cmd = list(seq_entry["cmd"])
+                    tick_dt = (loop_start - getattr(self, "_last_loop_start", loop_start)) if getattr(self, "_last_loop_start", None) is not None else tick_period or 0.02
+                    self._seq_elapsed += tick_dt
+                    if self._seq_elapsed >= seq_entry["duration_s"] and self._seq_idx < len(self.sim_fixed_cmd_seq) - 1:
+                        self._seq_idx += 1
+                        self._seq_elapsed = 0.0
+                    self._last_loop_start = loop_start
+                else:
+                    user_entry.loop(self)
                 sent_cmd = list(self.current_cmd)
                 
                 # 2. Sync with Sim (Action -> State)
@@ -487,6 +515,13 @@ class SimAgent:
         self._trajectory_last_perf = now_perf
         sim_state = response.get("state", {})
         ball_state = sim_state.get("ball", {})
+        robot_state = {}
+        robot_id = int(self._config.get("id", 0))
+        sim_robot_id = int(getattr(self, "id", robot_id))
+        for item in sim_state.get("robots", []):
+            if isinstance(item, dict) and int(item.get("id", -1)) == sim_robot_id:
+                robot_state = item
+                break
         robot_pos = self.get_self_pos()
         ball_pos = self.get_ball_pos_in_map()
         ball_local = self.get_ball_pos()
@@ -502,16 +537,18 @@ class SimAgent:
             "sim_time": response.get("sim_timestamp"),
             "dt_s": dt_s,
             "run_mode": (
-                "fixed_command" if self.sim_fixed_cmd is not None
+                "fixed_command_seq" if self.sim_fixed_cmd_seq is not None
+                else "fixed_command" if self.sim_fixed_cmd is not None
                 else "continuous_push"
             ),
             "team": self.color,
-            "robot_id": self._config.get("id", 0),
+            "robot_id": robot_id,
             "field_length": self._active_field_length,
             "field_width": self._active_field_width,
             "robot_x": robot_pos[0] if robot_pos is not None else None,
             "robot_y": robot_pos[1] if robot_pos is not None else None,
             "robot_yaw_deg": self.get_self_yaw(),
+            "is_fallen": robot_state.get("is_fallen", False),
             "ball_x": ball_pos[0] if ball_pos is not None else None,
             "ball_y": ball_pos[1] if ball_pos is not None else None,
             "ball_z": ball_state.get("z"),
@@ -534,12 +571,23 @@ class SimAgent:
             "distance_to_goal": errors.get("dist_to_goal"),
             # FSM-related fields (no FSM in continuous controller)
             "fsm_state": "",
-            "align_mode": "",
+            "align_mode": errors.get("align_mode", ""),
             "side_recovery_phase": "",
             "state_duration_s": None,
-            # Kick readiness (not active in push-only mode)
+            # Alignment-pipeline diagnostics
+            "is_behind_ball": errors.get("is_behind_ball", ""),
+            "is_laterally_aligned": errors.get("is_laterally_aligned", ""),
+            "is_facing_goal": errors.get("is_facing_goal", ""),
+            "robot_speed": errors.get("robot_speed", ""),
+            "can_kick_candidate": errors.get("can_kick_candidate", ""),
+            "ball_angle_deg": errors.get("ball_angle_deg", ""),
+            "approach_guard_input_vx": errors.get("approach_guard_input_vx", ""),
+            "approach_guard_input_vy": errors.get("approach_guard_input_vy", ""),
+            "approach_guard_input_w": errors.get("approach_guard_input_w", ""),
+            "approach_guard_applied": errors.get("approach_guard_applied", False),
+            # Kick readiness
             "can_kick": False,
-            "can_kick_reason": "",
+            "can_kick_reason": errors.get("can_kick_reason", ""),
             "kick_push": False,
         }
         recorder.write(row)
@@ -683,6 +731,11 @@ if __name__ == "__main__":
         "--sim-fixed-cmd",
         default=None,
         help="Debug only: send fixed normalized final command vx,vy,w to the simulator, bypassing user_entry logic.",
+    )
+    parser.add_argument(
+        "--sim-fixed-cmd-seq",
+        default=None,
+        help="Timed command sequence as JSON: [{\"cmd\":[vx,vy,w],\"duration_s\":5.0},...]. Overrides --sim-fixed-cmd.",
     )
     parser.add_argument(
         "--record-trajectory",

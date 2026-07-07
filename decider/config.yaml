@@ -143,15 +143,22 @@ continuous_push:
   k_yaw: 1.8
   k_sideline: 1.2
   target_behind: 0.15
-  d_transition: 1.0
-  d_scale: 0.4
   vx_max_approach: 1.0
-  vx_max_push: 0.9
   vx_max_push_rev: 0.2
   vy_max: 0.75
   w_max: 1.5
   sideline_margin: 0.8
   soft_clip_threshold: 0.7
+  near_ball_dist: 0.45
+  turn_only_angle_deg: 35
+  max_push_speed_near_ball: 0.05
+  max_candidate_speed: 0.35
+  lateral_align_upper: 0.25
+  lateral_orbit_exit: 0.18
+  lateral_align_vx_max: 0.18
+  align_push_vx_max: 0.35
+  align_push_unready_vx_max: 0.25
+  push_speed_base: 0.15
 find_ball:
   angle_threshold_degrees: 10
   rotation_vel_theta: 1

@@ -290,6 +290,55 @@ def build_summary(
             sum(near_vx) / len(near_vx) if near_vx else None
         )
 
+        # --- Alignment-pipeline diagnostic summary ---
+        can_kick_candidate_count = 0
+        not_behind_count = 0
+        for row in rows:
+            if _bool(row, "can_kick_candidate"):
+                can_kick_candidate_count += 1
+            if row.get("can_kick_reason", "") == "not_behind":
+                not_behind_count += 1
+        push_to_goal["can_kick_candidate_count"] = can_kick_candidate_count
+        push_to_goal["not_behind_count"] = not_behind_count
+
+        # First near-ball contact: first frame where ball_distance <= near_ball_dist
+        first_near_ball_angle = None
+        valid_near_ball_geometry = None
+        for row in rows:
+            bd = _float(row, "ball_distance")
+            if bd is not None and bd <= 0.45:
+                blx = _float(row, "ball_local_x")
+                bly = _float(row, "ball_local_y")
+                if blx is not None and bly is not None:
+                    first_near_ball_angle = math.degrees(math.atan2(bly, blx))
+                valid_near_ball_geometry = (
+                    _bool(row, "is_behind_ball")
+                    and _bool(row, "is_laterally_aligned")
+                    and _bool(row, "is_facing_goal")
+                )
+                break
+        push_to_goal["first_near_ball_angle"] = first_near_ball_angle
+        push_to_goal["valid_near_ball_geometry"] = valid_near_ball_geometry
+
+        # Goal progress: net ball movement toward goal during ALIGN_PUSH frames
+        goal_progress = None
+        align_push_rows = [
+            row for row in rows
+            if row.get("align_mode", "") == "ALIGN_PUSH"
+        ]
+        if len(align_push_rows) >= 2:
+            first = align_push_rows[0]
+            last = align_push_rows[-1]
+            bx0 = _float(first, "ball_x")
+            by0 = _float(first, "ball_y")
+            bx1 = _float(last, "ball_x")
+            by1 = _float(last, "ball_y")
+            if None not in (bx0, by0, bx1, by1):
+                team = str(rows[0].get("team", "red")).strip().lower()
+                goal_sign = -1.0 if team == "blue" else 1.0
+                goal_progress = goal_sign * (bx1 - bx0)
+        push_to_goal["goal_progress"] = goal_progress
+
     summary: dict[str, Any] = {
         "run_mode": run_mode,
         "fsm_enabled": any(row.get("fsm_state", "") for row in rows),
