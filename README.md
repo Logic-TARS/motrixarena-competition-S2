@@ -93,10 +93,11 @@ motrixarena-competition-S2/
 │   ├── isaac_sim/             # Isaac Sim 历史实现
 │   └── labbridge/             # WebView / Bridge / Sim Manager
 ├── MotrixLab/                 # K1 locomotion / RL 训练子项目
-├── docs/                      # 启动、训练、比赛和提交文档
+├── models/k1/                 # 默认 K1 policy 模型
+├── docs/                      # 启动、训练、比赛文档
+├── submission/final/          # 比赛最终提交包副本
 ├── tools/                     # 维护脚本
-├── model_20000_new.onnx       # 默认 K1 policy
-└── model_4700.pt              # 默认 K1 TorchScript policy
+└── scripts/                   # 常用启动和录制脚本
 ```
 
 Decider 负责策略逻辑，Simulation 负责物理仿真和可视化，两者通过 ZMQ 通信。
@@ -223,10 +224,11 @@ http://127.0.0.1:8000/
 │   ├── isaac_sim/             # Isaac Sim 历史实现
 │   └── labbridge/             # WebView / Sim Manager
 ├── MotrixLab/                 # RL 训练子项目
-├── docs/                      # 文档与提交材料
+├── models/k1/                 # 默认策略模型
+├── docs/                      # 文档
+├── submission/final/          # 比赛最终提交包副本
 ├── tools/                     # 工具脚本
-├── model_20000_new.onnx       # 默认策略模型
-└── model_4700.pt              # 默认策略模型
+└── scripts/                   # 常用启动和录制脚本
 ```
 
 ---

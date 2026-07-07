@@ -23,13 +23,13 @@ except ImportError:
     Node = object  # Fallback base class
 
 # Interfaces with other components
-import docs.final_submission.decider.interfaces.action
-import docs.final_submission.decider.interfaces.vision
-import docs.final_submission.decider.configuration as configuration
-from docs.final_submission.decider.trajectory import TrajectoryRecorder, default_trajectory_dir
+import submission.final.decider.interfaces.action
+import submission.final.decider.interfaces.vision
+import submission.final.decider.configuration as configuration
+from submission.final.decider.trajectory import TrajectoryRecorder, default_trajectory_dir
 
 # Import user_entry
-import docs.final_submission.decider.user_entry as user_entry
+import submission.final.decider.user_entry as user_entry
 
 
 class Agent(Node):
@@ -44,8 +44,8 @@ class Agent(Node):
         self.logger = self.get_logger()
         self.logger.info("[Core] Initializing the core")
         self._config = configuration.load_config()
-        self._action = docs.final_submission.decider.interfaces.action.Action(self)
-        self._vision = docs.final_submission.decider.interfaces.vision.Vision(self)
+        self._action = submission.final.decider.interfaces.action.Action(self)
+        self._vision = submission.final.decider.interfaces.vision.Vision(self)
         self.logger.info("[Core] Core initialized. Calling user's init()")
 
         user_entry.init(self)
@@ -366,17 +366,17 @@ class SimAgent:
         self.logger.info(f"[SimCore] Final Robot ID: {self.id}")
         
         # Init ZMQ Client
-        from docs.final_submission.decider.interfaces.sim_client import SimClient
+        from submission.final.decider.interfaces.sim_client import SimClient
         self.client = SimClient(ip=ip, port=port)
         
         # Init Interfaces (mocking or adapting)
         # We need to tell them we are in simulation
-        self._action = docs.final_submission.decider.interfaces.action.Action(self) 
-        self._vision = docs.final_submission.decider.interfaces.vision.Vision(self)
+        self._action = submission.final.decider.interfaces.action.Action(self) 
+        self._vision = submission.final.decider.interfaces.vision.Vision(self)
         
         # [NEW] Integrate GameController and Communication
-        from docs.final_submission.decider.interfaces.gamecontroller import GameController
-        from docs.final_submission.decider.interfaces.communication import Communication
+        from submission.final.decider.interfaces.gamecontroller import GameController
+        from submission.final.decider.interfaces.communication import Communication
         self.gamecontroller = GameController(self)
         self.communication = Communication(self)
         

@@ -70,7 +70,7 @@ python -c "import torch; m=torch.jit.load('gait/k1_walk_model_3600_motrixlab.pt'
 ## 6. 目录结构
 
 ```text
-final_submission/
+submission/final/
   README.md
   README_CN.md
   README_Gait.md

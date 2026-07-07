@@ -177,7 +177,7 @@ screen -r decider_red_0     # 进入会话；按 Ctrl+A 然后 D 退出
 
 如果只想本地跑一个仿真实例，不需要网页管理器，可以直接启动 `sim2sim_runner.py`：
 
-默认 **K1** 使用仓库根目录 **`model_4700.pt`（TorchScript，47→12 腿控）**；若不存在则尝试 `legged_gym/policy/booster_k1/model_4700.onnx`；两者皆无则回退 `simulation/motrixsim/assets/policies/k1_model_46000.pt` 并打印提示。当 **腿控策略生效** 且 **`assets/policies/k1_model_46000.pt` 存在** 时，会 **自动混合**：速度指令（体坐标系 vx/vy、转弯 w）低于阈值时用 **46000 全身** 站立/上半身姿态，指令足够大时用 **4700 腿控** 行走（带滞回避免抖动）。强制仅旧全身策略：加 `--no-k1-legged-gym` 或 `--policy .../k1_model_46000.pt`。
+默认 **K1** 使用仓库 `models/k1/model_4700.pt`（TorchScript，47→12 腿控）；若不存在则尝试 `legged_gym/policy/booster_k1/model_4700.onnx`；两者皆无则回退 `simulation/motrixsim/assets/policies/k1_model_46000.pt` 并打印提示。当 **腿控策略生效** 且 **`assets/policies/k1_model_46000.pt` 存在** 时，会 **自动混合**：速度指令（体坐标系 vx/vy、转弯 w）低于阈值时用 **46000 全身** 站立/上半身姿态，指令足够大时用 **4700 腿控** 行走（带滞回避免抖动）。强制仅旧全身策略：加 `--no-k1-legged-gym` 或 `--policy .../k1_model_46000.pt`。
 
 ```bash
 cd ./sim_soccer2/simulation/motrixsim
@@ -196,7 +196,7 @@ conda run -n motrixsim0508 python sim2sim_runner.py --team-size 3 --real-time
 | `--robot-type` | 机器人类型，`k1`（默认）或 `pi_plus` |
 | `--team-size` | 每队机器人数量（红蓝相等），范围 `0..7`，默认 `1` |
 | `--use-referee` | 启用内置裁判盒（开球 / 出界 / 角球 / 门球 / 进球 / 超时等） |
-| `--no-k1-legged-gym` | 仅 K1：改用旧版 78 维 Torch 全身策略（默认优先根目录 `model_4700.pt` 腿控） |
+| `--no-k1-legged-gym` | 仅 K1：改用旧版 78 维 Torch 全身策略（默认优先 `models/k1/model_4700.pt` 腿控） |
 | `--policy` | 覆盖策略；程序会根据 `.pt` 自动区分 47→12（legged）与 78→22（全身），`.onnx` 视为 legged |
 
 示例（启动 `pi_plus`）：

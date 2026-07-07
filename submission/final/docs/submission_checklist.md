@@ -84,7 +84,7 @@ Use this checklist before submitting your package to the RoboGo platform.
 
 ## Pre-Submission Quick Verify
 
-Run these commands from `final_submission/`:
+Run these commands from `submission/final/`:
 
 ```bash
 # 1. Check directory structure
@@ -111,7 +111,7 @@ grep -r "NjM5NWVkMSAgLQo" .
 
 ## Latest Local Verification
 
-Executed from `final_submission/`:
+Executed from `submission/final/`:
 
 ```bash
 python -c "import yaml; yaml.safe_load(open('decider/config.yaml')); print('config OK')"

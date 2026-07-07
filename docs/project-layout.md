@@ -42,10 +42,10 @@
 
 ## 提交包和参考工程
 
-- `final_submission/`
+- `submission/final/`
   - 比赛提交包整理区。
-  - `final_submission/decider/` 是提交版本的决策器副本，和根目录 `decider/` 不是同一个运行入口；同步前需要手动确认差异。
-  - `final_submission/gait/` 保存提交用步态模型。
+  - `submission/final/decider/` 是提交版本的决策器副本，和根目录 `decider/` 不是同一个运行入口；同步前需要手动确认差异。
+  - `submission/final/gait/` 保存提交用步态模型。
 
 - `booster_train/`
   - 外部/参考训练工程副本，目录内带独立 `.git/`。
@@ -57,18 +57,22 @@
 
 ## 文档目录
 
+- `models/k1/`
+  - 默认 K1 policy/model 文件。
+  - 当前运行配置会优先查找 `models/k1/model_20000_new.onnx` 和 `models/k1/model_4700.pt`。
+
 - `docs/`
   - 启动、训练、比赛、Docker 和整理说明文档。
 
 - `README.md`
   - 仓库主说明，保留最常用入口和快速启动信息。
 
-## 根目录模型文件
+## 模型文件
 
-- `model_20000_new.onnx`
-- `model_4700.pt`
+- `models/k1/model_20000_new.onnx`
+- `models/k1/model_4700.pt`
 
-这两个仍是当前运行配置里的默认 policy/model 路径之一，保持在根目录。移动它们需要同步修改 `simulation/motrixsim/app/runtime_config.py`、README 和启动文档。
+这两个仍是当前运行配置里的默认 policy/model 路径之一。移动它们需要同步修改 `simulation/motrixsim/app/runtime_config.py`、README 和启动文档。
 
 ## 本地产物清理建议
 

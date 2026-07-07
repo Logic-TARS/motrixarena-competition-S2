@@ -14,10 +14,10 @@ DECIDER_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if DECIDER_PATH not in sys.path:
     sys.path.append(DECIDER_PATH)
 
-from docs.final_submission.decider.logic.strategy_statemachines.defend_ball_state_machine import DefendBallStateMachine
-from docs.final_submission.decider.logic.strategy_statemachines.dribble_ball_state_machine import DribbleBallStateMachine
-from docs.final_submission.decider.logic.strategy_statemachines.shoot_ball_state_machine import ShootBallStateMachine
-from docs.final_submission.decider.logic.strategy_statemachines.attack_state_machine import StateMachine
+from submission.final.decider.logic.strategy_statemachines.defend_ball_state_machine import DefendBallStateMachine
+from submission.final.decider.logic.strategy_statemachines.dribble_ball_state_machine import DribbleBallStateMachine
+from submission.final.decider.logic.strategy_statemachines.shoot_ball_state_machine import ShootBallStateMachine
+from submission.final.decider.logic.strategy_statemachines.attack_state_machine import StateMachine
 
 # Configure logging
 logging.basicConfig(

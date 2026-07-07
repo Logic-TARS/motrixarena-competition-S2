@@ -72,7 +72,7 @@ Expected model output shape:
 ## 6. Directory Structure
 
 ```text
-final_submission/
+submission/final/
   README.md
   README_CN.md
   README_Gait.md
