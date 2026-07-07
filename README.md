@@ -49,10 +49,20 @@
 | 多机器人角色 | attacker / support / defender |
 | 可视化管理 | Sim Manager Web Dashboard |
 | 可验证材料 | 视频录制、轨迹 CSV、诊断报告、策略入口代码 |
-| 比赛排名 / 得分 | 待补充 |
-| 任务完成率 / 进球率 | 待补充 |
+| 比赛排名 / 得分 | 待真实比赛结果补充 |
+| 任务完成率 / 进球率 | 待真实比赛结果补充 |
 
-> 可继续补充：最终比赛排名、单场得分、进球数、胜率、完整比赛视频、关键轨迹诊断截图。
+### 本地示例运行结果
+
+以下材料来自本地 demo / baseline 运行，用于展示工程链路和诊断能力，不代表最终比赛排名或官方成绩。
+
+| 材料 | 链接 | 说明 |
+|---|---|---|
+| 3v3 demo 回放 | [demo-match-20260614-105108.mp4](docs/assets/demo/demo-match-20260614-105108.mp4) | 本地录制的短回放片段 |
+| 轨迹时间序列 | [demo-trajectory-timeseries.png](docs/assets/demo/demo-trajectory-timeseries.png) | 机器人、球和命令随时间变化 |
+| Locomotion 速度跟踪 | [loco-v030-velocity-tracking.png](docs/assets/demo/loco-v030-velocity-tracking.png) | `T1_forward_velocity/v030` 的速度跟踪诊断图 |
+
+Locomotion baseline `20260614_135745_default` 共记录 3 个 case，结果为 `0 pass / 3 fail`，acceptance rating 为 `Not recommended`。这些失败样例用于暴露底层步态跟踪和稳定性问题，支撑后续调参与模型迭代。
 
 ---
 
@@ -228,19 +238,6 @@ http://127.0.0.1:8000/
 ├── tools/                     # 工具脚本
 └── scripts/                   # 常用启动和录制脚本
 ```
-
----
-
-## 📝 后续可补充材料
-
-为了让该项目更适合简历和面试展示，建议继续补充：
-
-- 最终比赛排名 / 得分 / 胜率 / 进球数；
-- 3v3 策略回放 GIF 或 MP4；
-- 轨迹诊断截图，例如推球失败前后的 `diagnosis.txt`；
-- attacker / support / defender 三角色的示意图；
-- baseline 对比：单机器人 chase_ball vs 多角色 ContinuousPushController；
-- 关键参数表：速度限幅、sideline margin、target_behind、yaw gain、lateral gain。
 
 ---
 
