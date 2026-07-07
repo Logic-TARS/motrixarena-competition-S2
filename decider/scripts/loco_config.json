@@ -1,0 +1,177 @@
+{
+  "_comment": "Locomotion baseline test matrix. All commands are normalized [vx, vy, w] in [-1, 1].",
+
+  "tests": {
+    "T0_static_stability": {
+      "description": "Static stability - robot should stay in place with zero command",
+      "cases": [
+        {"id": "zero_cmd", "cmd": [0.0, 0.0, 0.0], "duration_s": 60, "repeats": 5}
+      ],
+      "criteria": {
+        "no_falls": true,
+        "max_displacement_m": 0.15,
+        "max_yaw_drift_deg": 10.0
+      }
+    },
+
+    "T1_forward_velocity": {
+      "description": "Forward velocity tracking at increasing speeds",
+      "cases": [
+        {"id": "v015", "cmd": [0.15, 0.0, 0.0], "duration_s": 30, "repeats": 3},
+        {"id": "v030", "cmd": [0.30, 0.0, 0.0], "duration_s": 30, "repeats": 3},
+        {"id": "v045", "cmd": [0.45, 0.0, 0.0], "duration_s": 30, "repeats": 3}
+      ],
+      "criteria": {
+        "no_falls": true,
+        "velocity_error_percent_max": 30.0,
+        "lateral_drift_ratio_max": 0.20,
+        "direction_correct": true
+      }
+    },
+
+    "T2_backward": {
+      "description": "Backward movement capability",
+      "cases": [
+        {"id": "v_015", "cmd": [-0.15, 0.0, 0.0], "duration_s": 20, "repeats": 3},
+        {"id": "v_030", "cmd": [-0.30, 0.0, 0.0], "duration_s": 20, "repeats": 3}
+      ],
+      "criteria": {
+        "no_falls": true,
+        "direction_correct": true,
+        "max_yaw_drift_deg": 20.0
+      }
+    },
+
+    "T3_lateral": {
+      "description": "Lateral (strafing) movement capability",
+      "cases": [
+        {"id": "vy020", "cmd": [0.0, 0.20, 0.0], "duration_s": 20, "repeats": 3},
+        {"id": "vy_020", "cmd": [0.0, -0.20, 0.0], "duration_s": 20, "repeats": 3},
+        {"id": "vy040", "cmd": [0.0, 0.40, 0.0], "duration_s": 20, "repeats": 3},
+        {"id": "vy_040", "cmd": [0.0, -0.40, 0.0], "duration_s": 20, "repeats": 3}
+      ],
+      "criteria": {
+        "no_falls": true,
+        "direction_correct": true,
+        "forward_crosstalk_ratio_max": 0.35
+      }
+    },
+
+    "T4_turning": {
+      "description": "In-place turning capability",
+      "cases": [
+        {"id": "w04", "cmd": [0.0, 0.0, 0.4], "duration_s": 15, "repeats": 3},
+        {"id": "w_04", "cmd": [0.0, 0.0, -0.4], "duration_s": 15, "repeats": 3},
+        {"id": "w08", "cmd": [0.0, 0.0, 0.8], "duration_s": 15, "repeats": 3},
+        {"id": "w_08", "cmd": [0.0, 0.0, -0.8], "duration_s": 15, "repeats": 3}
+      ],
+      "criteria": {
+        "no_falls": true,
+        "direction_correct": true,
+        "max_position_drift_m": 0.5
+      }
+    },
+
+    "T5_combined_arcs": {
+      "description": "Combined arc movements (vx + w)",
+      "cases": [
+        {"id": "arc_fwd_left",  "cmd": [0.25, 0.0, 0.4],  "duration_s": 25, "repeats": 3},
+        {"id": "arc_fwd_right", "cmd": [0.25, 0.0, -0.4], "duration_s": 25, "repeats": 3},
+        {"id": "arc_diag_left", "cmd": [0.20, 0.15, 0.3], "duration_s": 25, "repeats": 3},
+        {"id": "arc_diag_right","cmd": [0.20, -0.15, -0.3],"duration_s": 25, "repeats": 3}
+      ],
+      "criteria": {
+        "no_falls": true,
+        "trajectory_continuous": true,
+        "direction_correct": true
+      }
+    },
+
+    "T6_step_response": {
+      "description": "Step response - command changes abruptly",
+      "type": "sequence",
+      "sequences": [
+        {
+          "id": "forward_step",
+          "steps": [
+            {"cmd": [0.0, 0.0, 0.0], "duration_s": 5.0},
+            {"cmd": [0.4, 0.0, 0.0], "duration_s": 10.0},
+            {"cmd": [0.0, 0.0, 0.0], "duration_s": 10.0}
+          ]
+        },
+        {
+          "id": "turn_step",
+          "steps": [
+            {"cmd": [0.0, 0.0, 0.0], "duration_s": 5.0},
+            {"cmd": [0.0, 0.0, 0.8], "duration_s": 8.0},
+            {"cmd": [0.0, 0.0, 0.0], "duration_s": 8.0}
+          ]
+        }
+      ],
+      "repeats": 1,
+      "criteria": {
+        "no_falls": true,
+        "response_time_s_max": 2.0,
+        "decay_5s_after_stop": true
+      }
+    },
+
+    "T7_endurance": {
+      "description": "Long-duration stability tests",
+      "cases": [
+        {"id": "fwd_120s", "cmd": [0.25, 0.0, 0.0], "duration_s": 120, "repeats": 1},
+        {"id": "arc_120s", "cmd": [0.20, 0.0, 0.3], "duration_s": 120, "repeats": 1}
+      ],
+      "criteria": {
+        "no_falls": true,
+        "no_sustained_yaw_runaway": true,
+        "hz_stable": true
+      }
+    },
+
+    "T8_ball_push": {
+      "description": "Ball push capability - robot walks forward into ball",
+      "cases": [
+        {"id": "push", "cmd": [0.25, 0.0, 0.0], "duration_s": 30, "repeats": 5}
+      ],
+      "ball_teleport": {"x": 0.0, "y": 0.3, "z": 0.0917},
+      "criteria": {
+        "no_falls": true,
+        "ball_forward_progress_m": 0.8,
+        "robot_stable_after_contact": true
+      }
+    },
+
+    "T9_limit_scan": {
+      "description": "Limit boundary scanning - find max safe operating envelope",
+      "cases": [
+        {"id": "vx_max", "cmd": [0.6, 0.0, 0.0], "duration_s": 15, "repeats": 2},
+        {"id": "vy_max", "cmd": [0.0, 0.6, 0.0], "duration_s": 15, "repeats": 2},
+        {"id": "w_max",  "cmd": [0.0, 0.0, 1.0], "duration_s": 15, "repeats": 2},
+        {"id": "combo_max", "cmd": [0.45, 0.3, 0.6], "duration_s": 15, "repeats": 2}
+      ],
+      "criteria": {
+        "_comment": "T9 has no pass/fail - it documents the safe envelope",
+        "document_safe_limits": true
+      }
+    }
+  },
+
+  "acceptance_rating": {
+    "match_ready": {
+      "label": "比赛可用",
+      "description": "T0-T8 all pass, T9 yields clear safe limits, 0 falls or loss of control",
+      "conditions": ["T0-T8 all pass", "T9 has safe limits", "zero falls"]
+    },
+    "marginal": {
+      "label": "勉强可用",
+      "description": "T0-T7 pass, T8 pushes ball but unstable, some high-speed failures manageable via upper-level limits",
+      "conditions": ["T0-T7 pass", "T8 ball moves forward", "high-speed failures bounded"]
+    },
+    "not_recommended": {
+      "label": "不建议进入策略调试",
+      "description": "Basic standing, forward, or turning frequently fail; falls or severe drift on simple commands",
+      "conditions": ["T0 or T1 or T4 fails", "falls on basic commands", "severe drift"]
+    }
+  }
+}

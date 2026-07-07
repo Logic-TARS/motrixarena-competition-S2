@@ -296,6 +296,25 @@ class SimAgent:
                     raise ValueError("--sim-fixed-cmd must be formatted as vx,vy,w")
                 self.sim_fixed_cmd = [float(p) for p in parts]
                 self.sim_fixed_cmd = [float(np.clip(v, -1.0, 1.0)) for v in self.sim_fixed_cmd]
+            self.sim_fixed_cmd_seq = None
+            self._seq_idx = 0
+            self._seq_elapsed = 0.0
+            if hasattr(args, "sim_fixed_cmd_seq") and args.sim_fixed_cmd_seq:
+                import json
+                raw = str(args.sim_fixed_cmd_seq)
+                if raw.startswith("@"):
+                    with open(raw[1:], "r") as _f:
+                        seq = json.load(_f)
+                else:
+                    seq = json.loads(raw)
+                self.sim_fixed_cmd_seq = []
+                for entry in seq:
+                    cmd = [float(np.clip(v, -1.0, 1.0)) for v in entry["cmd"]]
+                    self.sim_fixed_cmd_seq.append({
+                        "cmd": cmd,
+                        "duration_s": float(entry["duration_s"]),
+                    })
+                self.sim_fixed_cmd = None  # seq overrides fixed cmd
             trajectory_enabled = bool(
                 getattr(args, "record_trajectory", False)
                 or getattr(args, "trajectory_dir", None)
@@ -423,10 +442,19 @@ class SimAgent:
             try:
                 loop_start = time.perf_counter()
                 # 1. User Loop (Think), or fixed command for locomotion debugging.
-                if self.sim_fixed_cmd is None:
-                    user_entry.loop(self)
-                else:
+                if self.sim_fixed_cmd is not None:
                     self.current_cmd = list(self.sim_fixed_cmd)
+                elif self.sim_fixed_cmd_seq is not None:
+                    seq_entry = self.sim_fixed_cmd_seq[self._seq_idx]
+                    self.current_cmd = list(seq_entry["cmd"])
+                    tick_dt = (loop_start - getattr(self, "_last_loop_start", loop_start)) if getattr(self, "_last_loop_start", None) is not None else tick_period or 0.02
+                    self._seq_elapsed += tick_dt
+                    if self._seq_elapsed >= seq_entry["duration_s"] and self._seq_idx < len(self.sim_fixed_cmd_seq) - 1:
+                        self._seq_idx += 1
+                        self._seq_elapsed = 0.0
+                    self._last_loop_start = loop_start
+                else:
+                    user_entry.loop(self)
                 sent_cmd = list(self.current_cmd)
                 
                 # 2. Sync with Sim (Action -> State)
@@ -509,7 +537,8 @@ class SimAgent:
             "sim_time": response.get("sim_timestamp"),
             "dt_s": dt_s,
             "run_mode": (
-                "fixed_command" if self.sim_fixed_cmd is not None
+                "fixed_command_seq" if self.sim_fixed_cmd_seq is not None
+                else "fixed_command" if self.sim_fixed_cmd is not None
                 else "continuous_push"
             ),
             "team": self.color,
@@ -702,6 +731,11 @@ if __name__ == "__main__":
         "--sim-fixed-cmd",
         default=None,
         help="Debug only: send fixed normalized final command vx,vy,w to the simulator, bypassing user_entry logic.",
+    )
+    parser.add_argument(
+        "--sim-fixed-cmd-seq",
+        default=None,
+        help="Timed command sequence as JSON: [{\"cmd\":[vx,vy,w],\"duration_s\":5.0},...]. Overrides --sim-fixed-cmd.",
     )
     parser.add_argument(
         "--record-trajectory",

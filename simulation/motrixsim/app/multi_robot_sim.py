@@ -3516,6 +3516,14 @@ class MultiRobotMotrixSim:
                             if isinstance(c, (list, tuple)) and len(c) >= 3:
                                 self.set_command(float(c[0]), float(c[1]), float(c[2]), robot_id=rid, timestamp=ts, source=src)
                     else:
+                        teleport = msg.get("teleport")
+                        if isinstance(teleport, dict):
+                            t_name = teleport.get("name", "")
+                            t_x = float(teleport.get("x", 0.0))
+                            t_y = float(teleport.get("y", 0.0))
+                            t_z = float(teleport.get("z", 0.0))
+                            if t_name == "ball":
+                                self.teleport_ball(t_x, t_y, t_z)
                         c = msg.get("cmd", [0.0, 0.0, 0.0])
                         rid = int(msg.get("id", 0))
                         if isinstance(c, (list, tuple)) and len(c) >= 3:
