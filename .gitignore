@@ -20,6 +20,9 @@ top_runs/
 *.old
 
 # Local/generated project copies and one-off materials
+CLAUDE.md
+**/CLAUDE.md
+.claude/
 booster_train/
 docx/
 examples/
