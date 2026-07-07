@@ -592,8 +592,8 @@ def build_robot_runtime_config(
         repo_root = mujoco_dir.parent.parent
         default_pt_policy = mujoco_dir / "assets" / "policies" / "k1_model_46000.pt"
         default_motrixlab_torch = mujoco_dir / "assets" / "policies" / "k1_walk_model_3600_motrixlab.pt"
-        default_legged_onnx_preferred = repo_root / "model_20000_new.onnx"
-        default_legged_torch = repo_root / "model_4700.pt"
+        default_legged_onnx_preferred = repo_root / "models" / "k1" / "model_20000_new.onnx"
+        default_legged_torch = repo_root / "models" / "k1" / "model_4700.pt"
         default_legged_onnx = repo_root / "legged_gym" / "policy" / "booster_k1" / "model_4700.onnx"
         want_legged = bool(use_k1_legged_gym)
         use_k1_amp_onnx = False

@@ -6,7 +6,7 @@
 ![Communication](https://img.shields.io/badge/Communication-ZMQ-555555)
 ![Robot](https://img.shields.io/badge/Robot-K1%20%7C%20Pi%20Plus-4B8BBE)
 
-> 本仓库用于展示我在 **MotrixArena S2 机器人足球仿真比赛** 中的多机器人决策控制与仿真工程实践。  
+> 本仓库是 **MotrixArena S2 机器人足球仿真比赛** 中的多机器人决策控制与仿真工程实践。  
 > 项目面向 **K1 / Pi Plus 双足或多足机器人足球任务**，基于 **MotrixSim + Decider + ZMQ** 构建感知、决策、控制、回放和诊断链路。
 
 ---
@@ -14,16 +14,13 @@
 ## ✅ 项目亮点 / 可验证结果
 
 - **3v3 多机器人足球决策**：支持 attacker / support / defender 角色分工，按机器人 ID 自动分配策略。
-- **Decider 决策框架**：上层策略通过 Python 状态机实现，屏蔽仿真进程、网络通信和底层控制复杂度。
-- **连续推球控制器**：实现 `ContinuousPushController`，通过球-门方向、机器人位姿、横向误差、朝向误差和边线风险计算速度命令。
+- **Decider 决策框架**：上层策略通过状态机实现，屏蔽仿真进程、网络通信和底层控制复杂度。
+- **连续推球控制器**：实现连续推球控制器，通过球-门方向、机器人位姿、横向误差、朝向误差和边线风险计算速度命令。
 - **多层状态机结构**：基础动作层、战术层、角色策略层分离，便于扩展找球、追球、盘带、射门、守门等行为。
-- **ZMQ 通信链路**：Decider 作为客户端连接仿真服务端，每个机器人通过独立端口接收状态并发送动作。
-- **仿真管理与可视化**：支持 Sim Manager 网页端管理仿真实例，也支持命令行启动比赛和队伍。
-- **轨迹记录与诊断**：支持比赛过程视频录制、轨迹 CSV 导出和诊断脚本分析，用于定位推球失败、状态切换异常和控制饱和问题。
 
 ---
 
-## 🧩 问题—方法—效果
+## 🧩 技术挑战与解决方案
 
 | 问题 | 解决方法 | 产生效果 |
 |---|---|---|
@@ -31,38 +28,35 @@
 | 机器人只追球容易把球推向边线，无法稳定朝球门推进 | 设计 `ContinuousPushController`，计算 behind-depth、lateral error、yaw error、sideline risk 等误差项，并连续生成速度指令 | 将“追球”转化为“站到球后方并沿球门方向推球”，提升进攻动作的方向性 |
 | 状态机频繁切换会造成控制不连续，机器人接近球后容易震荡 | 使用连续误差空间控制，结合距离相关权重、速度限幅、soft-clip 和近球角速度阻尼 | 减少模式切换带来的抖动，使接近、对齐、推球过程更连续 |
 | 多机器人比赛调试困难，肉眼难以判断失败原因 | 增加视频录制、轨迹记录和诊断脚本，记录机器人位姿、球位置、速度命令、FSM 状态和对齐信息 | 可复盘每一帧决策，定位“没看到球、没站到球后、推球方向偏、靠边线”等问题 |
-| 仿真启动、队伍管理和多进程调试成本高 | 封装 Sim Manager、启动脚本、队伍启动脚本和配置文件 | 降低复现实验门槛，支持 1v1 / 3v3 仿真、回放和演示 |
-
 ---
 
 ## 📊 实验结果 / 工程结果
 
 | 指标 | 结果 |
 |---|---|
-| 比赛名称 | MotrixArena S2 机器人足球仿真比赛 |
-| 任务类型 | 机器人足球，支持 1v1 / 3v3 |
 | 主要机器人 | K1 / Pi Plus |
 | 决策框架 | Decider 状态机 |
 | 仿真平台 | MotrixSim，兼容 Isaac Sim 历史实现 |
 | 通信方式 | ZMQ，多机器人独立端口通信 |
 | 进攻策略 | `ContinuousPushController` 连续推球控制 |
-| 多机器人角色 | attacker / support / defender |
-| 可视化管理 | Sim Manager Web Dashboard |
-| 可验证材料 | 视频录制、轨迹 CSV、诊断报告、策略入口代码 |
-| 比赛排名 / 得分 | 待补充 |
-| 任务完成率 / 进球率 | 待补充 |
+| 比赛排名 | 第10名 优胜奖 |
+| 进球率 | 高于70% |
 
-> 可继续补充：最终比赛排名、单场得分、进球数、胜率、完整比赛视频、关键轨迹诊断截图。
+### 本地示例运行结果
+
+以下材料来自本地 demo / baseline 运行，用于展示工程链路和诊断能力，不代表最终比赛排名或官方成绩。
+
+| 材料 | 链接 | 说明 |
+|---|---|---|
+| 3v3 demo 回放 | [demo-match-20260614-105108.mp4](docs/assets/demo/demo-match-20260614-105108.mp4) | 本地录制的短回放片段 |
+| 轨迹时间序列 | [demo-trajectory-timeseries.png](docs/assets/demo/demo-trajectory-timeseries.png) | 机器人、球和命令随时间变化 |
+| Locomotion 速度跟踪 | [loco-v030-velocity-tracking.png](docs/assets/demo/loco-v030-velocity-tracking.png) | `T1_forward_velocity/v030` 的速度跟踪诊断图 |
+
+Locomotion baseline `20260614_135745_default` 共记录 3 个 case，结果为 `0 pass / 3 fail`，acceptance rating 为 `Not recommended`。这些失败样例用于暴露底层步态跟踪和稳定性问题，支撑后续调参与模型迭代。
 
 ---
 
-## 🧾 简历表述
-
-> 面向 MotrixArena S2 3v3 机器人足球仿真任务，基于 MotrixSim、ZMQ 与 Decider 状态机框架搭建多机器人决策控制链路，完成仿真启动、角色分配、状态感知、速度控制、视频录制与轨迹诊断流程；针对多机器人扎堆抢球、推球方向不稳定、接近球后控制震荡等问题，设计 attacker / support / defender 角色分工，并实现 `ContinuousPushController` 连续推球控制器，融合球-门方向、横向误差、朝向误差和边线风险生成速度命令，支撑 1v1 / 3v3 足球策略回放和比赛调试。
-
----
-
-## 🎯 比赛任务与技术难点
+## 🎯 比赛任务与难点
 
 机器人足球任务要求多个机器人在仿真场地内完成找球、追球、对齐、推球、射门、防守等行为。相比单机器人导航任务，S2 的难点主要在于：
 
@@ -93,10 +87,10 @@ motrixarena-competition-S2/
 │   ├── isaac_sim/             # Isaac Sim 历史实现
 │   └── labbridge/             # WebView / Bridge / Sim Manager
 ├── MotrixLab/                 # K1 locomotion / RL 训练子项目
-├── docs/                      # 启动、训练、比赛和提交文档
+├── models/k1/                 # 默认 K1 policy 模型
+├── docs/                      # 启动、训练、比赛文档
 ├── tools/                     # 维护脚本
-├── model_20000_new.onnx       # 默认 K1 policy
-└── model_4700.pt              # 默认 K1 TorchScript policy
+└── scripts/                   # 常用启动和录制脚本
 ```
 
 Decider 负责策略逻辑，Simulation 负责物理仿真和可视化，两者通过 ZMQ 通信。
@@ -223,24 +217,11 @@ http://127.0.0.1:8000/
 │   ├── isaac_sim/             # Isaac Sim 历史实现
 │   └── labbridge/             # WebView / Sim Manager
 ├── MotrixLab/                 # RL 训练子项目
-├── docs/                      # 文档与提交材料
+├── models/k1/                 # 默认策略模型
+├── docs/                      # 文档
 ├── tools/                     # 工具脚本
-├── model_20000_new.onnx       # 默认策略模型
-└── model_4700.pt              # 默认策略模型
+└── scripts/                   # 常用启动和录制脚本
 ```
-
----
-
-## 📝 后续可补充材料
-
-为了让该项目更适合简历和面试展示，建议继续补充：
-
-- 最终比赛排名 / 得分 / 胜率 / 进球数；
-- 3v3 策略回放 GIF 或 MP4；
-- 轨迹诊断截图，例如推球失败前后的 `diagnosis.txt`；
-- attacker / support / defender 三角色的示意图；
-- baseline 对比：单机器人 chase_ball vs 多角色 ContinuousPushController；
-- 关键参数表：速度限幅、sideline margin、target_behind、yaw gain、lateral gain。
 
 ---
 
