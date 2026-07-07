@@ -1,210 +1,249 @@
-# 机器人足球仿真环境项目速览
+# ⚽ MotrixArena S2 3v3 机器人足球仿真比赛项目
 
+![Python](https://img.shields.io/badge/Python-3.8%2B-3776AB?logo=python&logoColor=white)
+![Simulation](https://img.shields.io/badge/Simulation-MotrixSim-2E8B57)
+![Decision](https://img.shields.io/badge/Decider-State%20Machine-FF6F00)
+![Communication](https://img.shields.io/badge/Communication-ZMQ-555555)
+![Robot](https://img.shields.io/badge/Robot-K1%20%7C%20Pi%20Plus-4B8BBE)
 
+> 本仓库用于展示我在 **MotrixArena S2 机器人足球仿真比赛** 中的多机器人决策控制与仿真工程实践。  
+> 项目面向 **K1 / Pi Plus 双足或多足机器人足球任务**，基于 **MotrixSim + Decider + ZMQ** 构建感知、决策、控制、回放和诊断链路。
 
-## 目录
+---
 
-- [一、项目概述](#一项目概述)
+## ✅ 项目亮点 / 可验证结果
 
-- [二、模块组成](#二模块组成)
+- **3v3 多机器人足球决策**：支持 attacker / support / defender 角色分工，按机器人 ID 自动分配策略。
+- **Decider 决策框架**：上层策略通过 Python 状态机实现，屏蔽仿真进程、网络通信和底层控制复杂度。
+- **连续推球控制器**：实现 `ContinuousPushController`，通过球-门方向、机器人位姿、横向误差、朝向误差和边线风险计算速度命令。
+- **多层状态机结构**：基础动作层、战术层、角色策略层分离，便于扩展找球、追球、盘带、射门、守门等行为。
+- **ZMQ 通信链路**：Decider 作为客户端连接仿真服务端，每个机器人通过独立端口接收状态并发送动作。
+- **仿真管理与可视化**：支持 Sim Manager 网页端管理仿真实例，也支持命令行启动比赛和队伍。
+- **轨迹记录与诊断**：支持比赛过程视频录制、轨迹 CSV 导出和诊断脚本分析，用于定位推球失败、状态切换异常和控制饱和问题。
 
-- [三、技术架构](#三技术架构)
+---
 
-- [四、策略自定义开发](#四策略自定义开发)
+## 🧩 问题—方法—效果
 
-- [五、Decider的API接口 ](#五Decider的API接口)
+| 问题 | 解决方法 | 产生效果 |
+|---|---|---|
+| 多机器人足球任务中，单机器人追球策略容易出现扎堆、互相干扰和角色不清晰 | 设计 attacker / support / defender 三角色策略：0 号进攻推球，1 号支援站位，2 号防守站位 | 形成基础 3v3 协同框架，降低多机器人同时抢球导致的干扰 |
+| 机器人只追球容易把球推向边线，无法稳定朝球门推进 | 设计 `ContinuousPushController`，计算 behind-depth、lateral error、yaw error、sideline risk 等误差项，并连续生成速度指令 | 将“追球”转化为“站到球后方并沿球门方向推球”，提升进攻动作的方向性 |
+| 状态机频繁切换会造成控制不连续，机器人接近球后容易震荡 | 使用连续误差空间控制，结合距离相关权重、速度限幅、soft-clip 和近球角速度阻尼 | 减少模式切换带来的抖动，使接近、对齐、推球过程更连续 |
+| 多机器人比赛调试困难，肉眼难以判断失败原因 | 增加视频录制、轨迹记录和诊断脚本，记录机器人位姿、球位置、速度命令、FSM 状态和对齐信息 | 可复盘每一帧决策，定位“没看到球、没站到球后、推球方向偏、靠边线”等问题 |
+| 仿真启动、队伍管理和多进程调试成本高 | 封装 Sim Manager、启动脚本、队伍启动脚本和配置文件 | 降低复现实验门槛，支持 1v1 / 3v3 仿真、回放和演示 |
 
-- [六、Decider 配置](#六decider-配置)
+---
 
-  
+## 📊 实验结果 / 工程结果
 
-## 一、项目概述
+| 指标 | 结果 |
+|---|---|
+| 比赛名称 | MotrixArena S2 机器人足球仿真比赛 |
+| 任务类型 | 机器人足球，支持 1v1 / 3v3 |
+| 主要机器人 | K1 / Pi Plus |
+| 决策框架 | Decider 状态机 |
+| 仿真平台 | MotrixSim，兼容 Isaac Sim 历史实现 |
+| 通信方式 | ZMQ，多机器人独立端口通信 |
+| 进攻策略 | `ContinuousPushController` 连续推球控制 |
+| 多机器人角色 | attacker / support / defender |
+| 可视化管理 | Sim Manager Web Dashboard |
+| 可验证材料 | 视频录制、轨迹 CSV、诊断报告、策略入口代码 |
+| 比赛排名 / 得分 | 待补充 |
+| 任务完成率 / 进球率 | 待补充 |
 
-**sim-soccer** 是一个面向双足 / 多足机器人（如 **K1**、**Pi Plus**）的足球竞技仿真与决策控制项目。它在虚拟环境中（MotrixSim / Isaac Sim）还原足球比赛场景，并为研究者提供一套完整的感知—决策—控制框架，可用于多智能体策略的研究、比赛训练和算法验证。
+> 可继续补充：最终比赛排名、单场得分、进球数、胜率、完整比赛视频、关键轨迹诊断截图。
 
-项目将**物理仿真、进程管理、网络通信**等底层复杂性全部封装，上层开发者只需使用简洁的 Python API，即可专注于编写多机器人的足球竞技策略。
+---
 
+## 🧾 简历表述
 
+> 面向 MotrixArena S2 3v3 机器人足球仿真任务，基于 MotrixSim、ZMQ 与 Decider 状态机框架搭建多机器人决策控制链路，完成仿真启动、角色分配、状态感知、速度控制、视频录制与轨迹诊断流程；针对多机器人扎堆抢球、推球方向不稳定、接近球后控制震荡等问题，设计 attacker / support / defender 角色分工，并实现 `ContinuousPushController` 连续推球控制器，融合球-门方向、横向误差、朝向误差和边线风险生成速度命令，支撑 1v1 / 3v3 足球策略回放和比赛调试。
 
-## 二、模块组成
+---
 
-项目主要分为2部分：**决策层（Decider）** 和 **仿真层（Simulation）**。
+## 🎯 比赛任务与技术难点
 
-```
-mos-sim/
-├── decider/                   # 决策模块（机器人大脑）
-│   ├── decider.py             # 决策端入口
-│   ├── user_entry.py          # 用户自定义策略入口
-│   ├── config.yaml            # 决策端配置
-│   ├── interfaces/            # 感知 / 动作 / 比赛控制接口
-│   ├── logic/                 # 状态机实现
-│   │   ├── sub_statemachines/     # 基础动作状态机（找球、追球等）
-│   │   ├── strategy_statemachines/# 战术级状态机（进攻、防守等）
-│   │   └── policy_statemachines/  # 策略级状态机（守门员等）
-│   └── scripts/               # 整队启动、部署脚本
+机器人足球任务要求多个机器人在仿真场地内完成找球、追球、对齐、推球、射门、防守等行为。相比单机器人导航任务，S2 的难点主要在于：
+
+- **多机器人协同**：多个机器人不能只做同一种追球行为，否则容易扎堆和互相阻挡。
+- **球权控制**：机器人需要站到球的后方，而不是简单冲向球。
+- **方向控制**：推球方向需要对准对方球门，同时避免将球推向边线。
+- **连续控制**：接近球、绕到球后、推球、射门之间需要平滑衔接。
+- **可调试性**：比赛失败往往不是单一 bug，而是感知、状态机、控制参数和队形策略共同作用的结果。
+
+---
+
+## 🧠 核心方案
+
+### 1. Decider + Simulation 双模块架构
+
+项目主要分为两部分：
+
+```text
+motrixarena-competition-S2/
+├── decider/                   # 决策模块：机器人“大脑”
+│   ├── decider.py             # Decider 入口
+│   ├── user_entry.py          # 自定义策略入口
+│   ├── config.yaml            # 决策参数配置
+│   ├── interfaces/            # Action / Vision / GameController / SimClient
+│   └── logic/                 # 状态机与策略逻辑
 ├── simulation/                # 仿真模块
-│   ├── motrixsim/             # MotrixSim 仿真环境（主推）
-│   ├── isaac_sim/             # Isaac Sim 仿真环境（旧版）
+│   ├── motrixsim/             # MotrixSim 主仿真环境
+│   ├── isaac_sim/             # Isaac Sim 历史实现
 │   └── labbridge/             # WebView / Bridge / Sim Manager
-├── MotrixLab/                 # 强化学习训练框架
-├── legged_gym/                # K1 资源和旧 policy 兼容目录
-├── docs/                      # 启动、训练、比赛和项目整理文档
-├── tools/                     # 一次性维护脚本
+├── MotrixLab/                 # K1 locomotion / RL 训练子项目
+├── docs/                      # 启动、训练、比赛和提交文档
+├── tools/                     # 维护脚本
 ├── model_20000_new.onnx       # 默认 K1 policy
 └── model_4700.pt              # 默认 K1 TorchScript policy
 ```
 
-### 2.1 Decider 决策模块（`decider/`）
+Decider 负责策略逻辑，Simulation 负责物理仿真和可视化，两者通过 ZMQ 通信。
 
-机器人的“大脑”，负责逻辑与策略开发。以客户端形式连接仿真服务器，获取感知数据（球的位置、机器人自身位姿等），并输出动作指令（速度控制、踢球等）。
-
-### 2.2 Simulation 仿真模块（`simulation/`）
-
-- **`motrixsim/`**：基于 MotrixSim 的物理仿真环境，**当前主推的仿真引擎**，附带基于 FastAPI 的可视化管理器（Sim Manager），方便在网页端启停和管理多个仿真实例。
-- **`isaac_sim/`**：基于 NVIDIA Isaac Sim 的仿真环境（旧版，主实现已迁移到 MotrixSim）。
-- **`labbridge/`**：独立的 WebView、通信桥梁（Bridge）以及仿真进程管理模块，负责仿真环境与外部界面的通信。
-
-### 2.3 MotrixLab 训练模块（`MotrixLab/`）
-
-强化学习训练子项目。K1 训练环境在 `MotrixLab/motrix_envs/src/motrix_envs/locomotion/k1/`，训练脚本在 `MotrixLab/scripts/`。
-
-
-
-## 三、技术架构
-
-### 3.1 通信机制
-
-仿真环境（服务端）与决策代码（客户端）之间通过 **ZMQ (ZeroMQ)** 进行通信。每个机器人对应一个 ZMQ 端口，支持多机器人并发控制。
-
-**请求格式（单指令）：**
-
-```json
-{"cmd":[vx, vy, w], "id":0, "timestamp": 0, "source":"xxx"}
-```
-
-**响应格式：**
-
-```json
-{
-  "state": {
-    "robots": [{"id":0, "name":"robot_rp0", "x":0, "y":0, "theta":0, "team":"red"}],
-    "ball": {"x":0, "y":0, "z":0}
-  },
-  "sim_timestamp": 0,
-  "step_latency": 0,
-  "ack_timestamp": 0
-}
-```
-
-### 3.2 Web 可视化管理（Sim Manager）
-
-通过 Sim Manager 可以在浏览器中（`http://127.0.0.1:8000/`）：
-
-- 可视化启停仿真实例
-- 设置队伍规模（Team Size）
-- 查看 PID、ZMQ Port、WebView 链接
-- **一键生成 Decider 启动命令**（红蓝队、按机器人编号自动生成）
-
-### 3.3 坐标系设计
-
-项目定义了两套坐标系，分别用于相对感知与全局定位：
-
-**机器人坐标系（Robot Frame）：**
-
-- `X`：前向（米）
-- `Y`：左向（米）
-- `Theta`：逆时针（弧度），`0` 为正前方
-
-**地图坐标系（Map Frame）：**
-
-- `Y`：朝向对方球门
-- `X`：右侧
-- **蓝队相对仿真全局坐标做了镜像处理**，使得两队可以**完全复用同一套策略代码**，开发者无需为不同半场写两套逻辑。
-
-### 3.4 固定 Robot ID 映射
-
-无论 `team_size` 设置为多少，ID 映射始终固定：
-
-- `0..6 -> robot_rp0..robot_rp6`（红队）
-- `7..13 -> robot_bp0..robot_bp6`（蓝队）
-
-未启用的 ID 会被自动忽略。
-
-
-
-## 四、策略自定义开发
-
-### 4.1 主入口
-
-开发者在 `decider/user_entry.py` 中编写自定义的机器人策略。系统采用**状态机**架构来管理机器人的行为。
-
-### 4.2 `game(agent)` 主循环
-
-```python
-def game(agent):
-    # 如果没看到球，执行"找球"状态机
-    if not agent.get_if_ball():
-        agent.state_machine_runners['find_ball']()
-    # 如果看到了球，执行"追球"状态机
-    else:
-        agent.state_machine_runners['chase_ball']()
-```
-
-### 4.3 内置状态机
-
-项目按照**三层状态机**架构组织策略代码：
+### 2. 三层状态机组织
 
 | 层级 | 目录 | 作用 | 示例 |
 |---|---|---|---|
-| **基础动作层** | `decider/logic/sub_statemachines/` | 基础足球动作 | `find_ball`、`chase_ball`、`dribble`、`kick`、`go_back_to_field` |
-| **战术层** | `decider/logic/strategy_statemachines/` | 战术组合 | `attack`、`defend_ball`、`dribble_ball`、`shoot_ball` |
-| **策略层** | `decider/logic/policy_statemachines/` | 角色策略 | `goalkeeper` 等 |
+| 基础动作层 | `decider/logic/sub_statemachines/` | 单个基础动作 | `find_ball`、`chase_ball`、`dribble`、`kick`、`go_back_to_field` |
+| 战术层 | `decider/logic/strategy_statemachines/` | 多动作组合 | `attack`、`defend_ball`、`dribble_ball`、`shoot_ball` |
+| 角色策略层 | `decider/logic/policy_statemachines/` | 比赛角色 | `goalkeeper` 等 |
 
-**调用方式：**
+### 3. 3v3 角色分工
 
-```python
-agent.state_machine_runners['state_machine_name']()
+在仿真模式下，`game(agent)` 按机器人 ID 分配角色：
+
+| Robot ID | 角色 | 策略 |
+|---|---|---|
+| `0` | Attacker | 找球后执行 `ContinuousPushController`，负责推球进攻 |
+| `1` | Support | 站到球与己方球门连线后方约 1.2m，避免干扰进攻机器人 |
+| `2` | Defender | 在己方半场锚定防守位置，并跟随球的横向位置 |
+| 其他 ID | Fallback Attacker | 默认按进攻机器人处理 |
+
+### 4. ContinuousPushController 连续推球控制
+
+`ContinuousPushController` 的目标不是简单追球，而是让机器人：
+
+1. 接近球；
+2. 移动到球的后方；
+3. 面向对方球门；
+4. 沿球门方向持续推球；
+5. 靠近边线时自动向场地中心修正。
+
+核心误差项：
+
+| 误差项 | 含义 | 用途 |
+|---|---|---|
+| `behind_depth` | 机器人是否位于球后方 | 控制前后距离，保证能把球向球门方向推 |
+| `lateral_err` | 机器人相对球-门连线的横向偏差 | 控制左右修正，减少斜推 |
+| `yaw_err` | 机器人朝向与球门方向的偏差 | 控制转向，保证朝向正确 |
+| `ball_dist` | 机器人到球距离 | 在接近模式和推球模式之间连续加权 |
+| `sideline_risk` | 靠近边线的风险 | 增加向场地中心的修正，减少出界 |
+
+### 5. 轨迹记录与诊断
+
+项目支持比赛过程诊断：
+
+- 录制比赛视频：`scripts/record_match.sh`
+- 记录轨迹 CSV：`--record-trajectory`
+- 分析轨迹：`decider/scripts/analyze_trajectory.py`
+- 诊断失败原因：`decider/scripts/diagnose_trajectory.py`
+
+轨迹记录包含机器人位姿、球位置、速度命令、FSM 状态、对齐模式和踢球条件，可用于判断失败发生在感知、站位、对齐还是推球阶段。
+
+---
+
+## 🚀 运行方式
+
+### 1. 启动 Sim Manager
+
+```bash
+conda run -n motrixsim0508 python simulation/motrixsim/sim_manager.py --host 0.0.0.0 --port 8000
 ```
 
+浏览器打开：
 
+```text
+http://127.0.0.1:8000/
+```
 
-## 五、Decider的API接口 
+### 2. 启动仿真
 
-接口文件：
+```bash
+# 1v1 实时仿真
+./scripts/start_sim.sh
 
-- **Action**：`decider/interfaces/action.py`
-- **Vision**：`decider/interfaces/vision.py`
-- **GameController**：`decider/interfaces/gamecontroller.py`
+# 3v3 实时仿真
+./scripts/start_sim.sh --team-size 3
 
-### 5.1 感知 API
+# 指定 policy
+./scripts/start_sim.sh --policy path/to/model.pt
+```
 
-| 方法 | 说明 | 返回 |
-|---|---|---|
-| `agent.get_ball_pos()` | 球在机器人坐标系的位置 | `[x, y]` 或 `[None, None]` |
-| `agent.get_ball_distance()` | 到球的距离 | `float` |
-| `agent.get_ball_angle()` | 球相对机器人坐标系的角度 | `float` |
-| `agent.get_if_ball()` | 是否看见球 | `bool` |
-| `agent.get_self_pos()` | 机器人在地图坐标系的位置 | `[x, y]` |
-| `agent.get_self_yaw()` | 机器人在地图坐标系的朝向 | `float` |
+### 3. 启动单个 Decider
 
-### 5.2 动作 API
+```bash
+./scripts/start_decider.sh
+./scripts/start_decider.sh --color blue --id 0 --port 5556
+```
 
-| 方法 | 说明 |
-|---|---|
-| `agent.cmd_vel(vx, vy, vtheta)` | 机器人坐标系下的速度控制 |
-| `agent.stop()` | 停止运动 |
-| `agent.kick()` | 执行踢球 |
-| `agent.head_control(pitch, yaw)` | 头部 / 云台角度控制 |
+### 4. 启动整队
 
+```bash
+./decider/scripts/start_team.sh
+./decider/scripts/start_team.sh --red 3 --blue 2
+./decider/scripts/start_team.sh --kill
+```
 
+### 5. 录制比赛视频和轨迹
 
-## 六、Decider 配置
+```bash
+# 录制 1v1，默认 60 秒
+./scripts/record_match.sh
 
-编辑 `decider/config.yaml` 可调整默认参数：
+# 录制 3v3 demo，持续 120 秒
+./scripts/record_match.sh --demo-3v3 --d 120
 
-- `color`：默认队伍颜色
-- `id`：默认机器人 ID
+# 同时记录轨迹 CSV
+./scripts/record_match.sh --trajectory
+```
 
-### `cmd_vel` 处理
+---
 
-Decider 不再在 `config.yaml` 中提供专门的 `cmd_vel` 限幅项。速度命令的缩放与整形由控制逻辑本身完成。
+## 📁 仓库结构
+
+```text
+├── decider/                   # 决策模块
+│   ├── user_entry.py          # 自定义策略主入口
+│   ├── interfaces/            # 感知、动作、比赛控制接口
+│   ├── logic/                 # 状态机与角色策略
+│   └── scripts/               # 队伍启动、诊断脚本
+├── simulation/                # 仿真模块
+│   ├── motrixsim/             # MotrixSim 主仿真环境
+│   ├── isaac_sim/             # Isaac Sim 历史实现
+│   └── labbridge/             # WebView / Sim Manager
+├── MotrixLab/                 # RL 训练子项目
+├── docs/                      # 文档与提交材料
+├── tools/                     # 工具脚本
+├── model_20000_new.onnx       # 默认策略模型
+└── model_4700.pt              # 默认策略模型
+```
+
+---
+
+## 📝 后续可补充材料
+
+为了让该项目更适合简历和面试展示，建议继续补充：
+
+- 最终比赛排名 / 得分 / 胜率 / 进球数；
+- 3v3 策略回放 GIF 或 MP4；
+- 轨迹诊断截图，例如推球失败前后的 `diagnosis.txt`；
+- attacker / support / defender 三角色的示意图；
+- baseline 对比：单机器人 chase_ball vs 多角色 ContinuousPushController；
+- 关键参数表：速度限幅、sideline margin、target_behind、yaw gain、lateral gain。
+
+---
+
+## 👤 作者信息
+
+- **GitHub**: [Logic-TARS](https://github.com/Logic-TARS)
