@@ -1,8 +1,4 @@
-# MotrixArena S2 3v3 Robot Soccer
-
-[中文](README.zh-CN.md)
-
-Multi-robot decision, control, replay, and diagnostics project for the MotrixArena S2 robot soccer simulation competition. The system runs K1 / Pi Plus soccer agents through MotrixSim, a Decider state-machine stack, and ZMQ-based simulator communication.
+# MotrixArena S2 3v3 Robot Soccer _(motrixarena-competition-S2)_
 
 ![Python](https://img.shields.io/badge/Python-3.8%2B-3776AB?logo=python&logoColor=white)
 ![Simulation](https://img.shields.io/badge/Simulation-MotrixSim-2E8B57)
@@ -10,134 +6,42 @@ Multi-robot decision, control, replay, and diagnostics project for the MotrixAre
 ![Communication](https://img.shields.io/badge/Communication-ZMQ-555555)
 ![Robot](https://img.shields.io/badge/Robot-K1%20%7C%20Pi%20Plus-4B8BBE)
 
-## Demo / Replay
+3v3 robot soccer simulation strategy, replay, and diagnostics for MotrixArena S2.
 
-The repository includes local demo and diagnostic assets that show the simulation, trajectory logging, and locomotion analysis pipeline.
+This repository demonstrates a K1 / Pi Plus soccer simulation workflow built around MotrixSim, a Decider state-machine strategy stack, and reproducible match analysis tools. It includes a local 3v3 replay, trajectory time-series diagnostics, and locomotion tracking assets for reviewing the competition run.
 
-| Asset | Link | Purpose |
-| --- | --- | --- |
-| 3v3 demo replay | [demo-match-20260614-105108.mp4](docs/assets/demo/demo-match-20260614-105108.mp4) | Short local recording of the 3v3 simulation workflow |
-| Trajectory time series | [demo-trajectory-timeseries.png](docs/assets/demo/demo-trajectory-timeseries.png) | Robot, ball, command, and diagnostic values over time |
-| Locomotion velocity tracking | [loco-v030-velocity-tracking.png](docs/assets/demo/loco-v030-velocity-tracking.png) | Velocity-tracking diagnostic for `T1_forward_velocity/v030` |
+[中文](README.zh-CN.md)
 
-The locomotion baseline run `20260614_135745_default` recorded 3 cases with `0 pass / 3 fail` and an acceptance rating of `Not recommended`. These failing cases are kept as engineering diagnostics for gait tracking and stability work, not as official competition results.
+## Effect Showcase
 
-## Highlights
+![3v3 robot soccer replay 1](docs/assets/demo/football-1.gif)
 
-- Competition result: MotrixArena S2 excellent award, ranked 10th, with a goal rate above 70%.
-- Implemented a 3v3 simulation decision policy with attacker, support, and defender roles assigned by robot ID.
-- Used `decider/user_entry.py` as the main strategy entry point, with role behavior backed by `decider/logic/` state-machine components.
-- Built `ContinuousPushController` to convert simple ball chasing into continuous behind-ball alignment and goal-directed pushing.
-- Connected simulation and decision processes through ZMQ, with independent ports and robot IDs for multi-agent runs.
-- Added a repeatable diagnostics path for match video recording, trajectory CSV capture, trajectory plots, and failure analysis.
+![3v3 robot soccer replay 2](docs/assets/demo/football-2.gif)
 
-## Results
+![Locomotion velocity tracking](docs/assets/demo/loco-v030-velocity-tracking.png)
 
-| Item | Value |
-| --- | --- |
-| Competition | MotrixArena S2 robot soccer simulation |
-| Result | Excellent award |
-| Rank | 10th |
-| Goal rate | Above 70% |
-| Primary robot | K1 / Pi Plus |
-| Decision framework | Decider state machines |
-| Simulation platform | MotrixSim, with historical Isaac Sim compatibility |
-| Communication | ZMQ with independent multi-robot ports |
-| Primary attacking strategy | `ContinuousPushController` |
+## Background
 
-## Task Overview
+MotrixArena S2 focuses on simulated robot soccer. Multiple robots need to find the ball, approach from a useful angle, push toward the opponent goal, and hold support or defensive positions without interfering with teammates.
 
-MotrixArena S2 focuses on robot soccer in a simulated field. Multiple robots need to find the ball, approach it, align behind it, push or shoot toward the opponent goal, and hold defensive positions while avoiding teammate interference.
+This project keeps the high-level soccer behavior in the Decider layer, with the main strategy entry at [`decider/user_entry.py`](decider/user_entry.py) and state-machine logic in [`decider/logic/`](decider/logic/). Recording and analysis scripts make each run reproducible and inspectable at frame level.
 
-Key engineering challenges:
+## Install
 
-| Challenge | Approach |
-| --- | --- |
-| Multiple robots tend to crowd the same ball target | Assign attacker, support, and defender roles in simulation by robot ID |
-| Ball chasing alone pushes the ball sideways or out of bounds | Track ball-to-goal geometry and command the attacker to stay behind the ball |
-| Hard switching between chase, align, and push behavior causes jitter | Use continuous error-space control, speed limits, soft clipping, and near-ball angular damping |
-| Match failures are difficult to diagnose visually | Record video, trajectory CSVs, controller state, alignment metrics, and generated plots |
-
-## Architecture
-
-```text
-motrixarena-competition-S2/
-├── decider/                   # Decision module
-│   ├── user_entry.py          # Custom strategy entry point
-│   ├── decider.py             # Decider runtime
-│   ├── config.yaml            # Decision parameters
-│   ├── interfaces/            # Action, vision, game controller, and sim clients
-│   ├── logic/                 # State machines and strategy logic
-│   └── scripts/               # Team launch and diagnostics scripts
-├── simulation/                # Simulation module
-│   ├── motrixsim/             # MotrixSim runtime
-│   ├── isaac_sim/             # Historical Isaac Sim implementation
-│   └── labbridge/             # WebView, bridge, and sim manager
-├── MotrixLab/                 # K1 locomotion / RL subproject
-├── models/k1/                 # Default K1 policy models
-├── docs/                      # Documentation and demo assets
-├── tools/                     # Maintenance tools
-└── scripts/                   # Common launch and recording scripts
-```
-
-The Decider module owns strategy logic. The simulation module owns physics, visualization, and simulator runtime. The two sides communicate through ZMQ.
-
-## Strategy Design
-
-### State-Machine Layers
-
-| Layer | Directory | Responsibility | Examples |
-| --- | --- | --- | --- |
-| Primitive actions | `decider/logic/sub_statemachines/` | Single robot behaviors | `find_ball`, `chase_ball`, `dribble`, `kick`, `go_back_to_field` |
-| Tactical behaviors | `decider/logic/strategy_statemachines/` | Multi-action strategy composition | `attack`, `defend_ball`, `dribble_ball`, `shoot_ball` |
-| Role policies | `decider/logic/policy_statemachines/` | Competition-level roles | `goalkeeper` |
-
-### 3v3 Roles
-
-In simulation mode, `game(agent)` in `decider/user_entry.py` assigns behavior by robot ID:
-
-| Robot ID | Role | Behavior |
-| --- | --- | --- |
-| `0` | Attacker | Finds the ball, then runs `ContinuousPushController` to push toward goal |
-| `1` | Support | Positions about 1.2 m behind the ball on the ball-to-own-goal line and avoids blocking the attacker |
-| `2` | Defender | Holds an own-half anchor and tracks the ball laterally |
-| Other IDs | Fallback attacker | Uses the attacker path |
-
-### ContinuousPushController
-
-`ContinuousPushController` is the primary attacker strategy. Instead of only driving toward the ball, it continuously estimates:
-
-| Signal | Meaning | Use |
-| --- | --- | --- |
-| `behind_depth` | Whether the robot is behind the ball relative to the opponent goal | Controls forward/backward positioning for a valid push |
-| `lateral_err` | Offset from the ball-to-goal line | Reduces diagonal or sideways pushes |
-| `yaw_err` | Heading error relative to the goal direction | Aligns the robot toward goal |
-| `ball_dist` | Robot-to-ball distance | Blends approach and push behavior |
-| `sideline_risk` | Near-boundary risk | Adds correction toward the field center |
-
-The controller records its active alignment mode and diagnostic values so trajectory analysis can identify whether a failure came from perception, behind-ball positioning, heading alignment, sideline correction, or locomotion.
-
-## Quick Start
-
-### 1. Clone
+Clone the repository and install Python dependencies:
 
 ```bash
 git clone https://github.com/Logic-TARS/motrixarena-competition-S2.git
 cd motrixarena-competition-S2
-```
-
-### 2. Install Dependencies
-
-The helper scripts use `uv` for Python execution. The full simulator stack also depends on the project-specific MotrixSim / MotrixLab environment and assets.
-
-```bash
 python3 -m pip install --user uv
 pip install -r requirements.txt
 ```
 
-For container-based setup, see [compose.yaml](compose.yaml).
+For container-based setup, see [`compose.yaml`](compose.yaml). The default K1 policy model used by the examples is [`models/k1/model_4700.pt`](models/k1/model_4700.pt).
 
-### 3. Start Simulation
+## Usage
+
+Start a simulation:
 
 ```bash
 # 1v1 real-time simulation
@@ -150,14 +54,14 @@ For container-based setup, see [compose.yaml](compose.yaml).
 ./scripts/start_sim.sh --policy models/k1/model_4700.pt
 ```
 
-### 4. Start Decider
+Start one Decider process:
 
 ```bash
 ./scripts/start_decider.sh
 ./scripts/start_decider.sh --color blue --id 0 --port 5556
 ```
 
-### 5. Start a Team
+Start or stop a team:
 
 ```bash
 ./decider/scripts/start_team.sh
@@ -165,7 +69,7 @@ For container-based setup, see [compose.yaml](compose.yaml).
 ./decider/scripts/start_team.sh --kill
 ```
 
-### 6. Record a Match
+Record a match:
 
 ```bash
 # Record a 1v1 match, default duration 60 seconds
@@ -178,42 +82,96 @@ For container-based setup, see [compose.yaml](compose.yaml).
 ./scripts/record_match.sh --trajectory
 ```
 
-## Diagnostics
+## Results
 
-The project keeps diagnostics close to the simulation loop:
+| Item | Value |
+| --- | --- |
+| Competition | MotrixArena S2 robot soccer simulation |
+| Award | Excellent award |
+| Rank | 10th |
+| Goal rate | Above 70% |
+| Robot platform | K1 / Pi Plus |
+| Decision framework | Decider state machines |
+| Simulation platform | MotrixSim, with historical Isaac Sim compatibility |
+| Main attacking strategy | `ContinuousPushController` |
+
+<a id="demo-replay"></a>
+
+## Demo / Replay
+
+| Asset | Link | Description |
+| --- | --- | --- |
+| 3v3 match replay | [`demo-match-20260614-105108.mp4`](docs/assets/demo/demo-match-20260614-105108.mp4) | Local 3v3 simulation replay |
+| 3v3 replay GIF 1 | [`football-1.gif`](docs/assets/demo/football-1.gif) | README-friendly animated replay |
+| 3v3 replay GIF 2 | [`football-2.gif`](docs/assets/demo/football-2.gif) | README-friendly animated replay |
+| 3v3 source video 1 | [`football-1.mp4`](docs/assets/demo/football-1.mp4) | Source video for GIF 1 |
+| 3v3 source video 2 | [`football-2.mp4`](docs/assets/demo/football-2.mp4) | Source video for GIF 2 |
+| Trajectory time series | [`demo-trajectory-timeseries.png`](docs/assets/demo/demo-trajectory-timeseries.png) | Robot, ball, and command values over time |
+| Locomotion tracking | [`loco-v030-velocity-tracking.png`](docs/assets/demo/loco-v030-velocity-tracking.png) | Velocity-tracking diagnostic for `T1_forward_velocity/v030` |
+
+## Architecture
+
+```text
+motrixarena-competition-S2/
+├── decider/                   # Decision runtime and strategy logic
+│   ├── user_entry.py          # Custom strategy entry point
+│   ├── decider.py             # Decider runtime
+│   ├── interfaces/            # Action, vision, game controller, and sim clients
+│   ├── logic/                 # State machines and role policies
+│   └── scripts/               # Team launch and diagnostics scripts
+├── simulation/                # MotrixSim and historical Isaac Sim integration
+├── MotrixLab/                 # K1 locomotion and policy execution subproject
+├── models/k1/                 # Default K1 policy models
+├── docs/assets/demo/          # Demo replay and diagnostic plots
+└── scripts/                   # Simulation, decider, and recording helpers
+```
+
+## Strategy
+
+In simulation mode, `game(agent)` assigns each robot a role by ID:
+
+| Robot ID | Role | Behavior |
+| --- | --- | --- |
+| `0` | Attacker | Finds the ball and pushes it toward the opponent goal |
+| `1` | Support | Positions behind the ball on the ball-to-own-goal line and avoids blocking the attacker |
+| `2` | Defender | Holds an own-half defensive anchor and tracks the ball laterally |
+| Other IDs | Fallback attacker | Uses the attacker behavior path |
+
+`ContinuousPushController` turns ball chasing into a controlled push sequence. It estimates behind-ball depth, lateral offset from the ball-to-goal line, heading error, ball distance, and sideline risk, then generates smooth velocity commands for approach, alignment, and push phases.
+
+## Diagnostics
 
 | Tool | Purpose |
 | --- | --- |
-| `scripts/record_match.sh` | Starts simulation and decider processes, records frames, and encodes a match video |
+| [`scripts/record_match.sh`](scripts/record_match.sh) | Starts simulation and decider processes, records frames, and encodes a match video |
 | `--record-trajectory` / `--trajectory` | Enables trajectory CSV logging for a run |
-| `decider/scripts/analyze_trajectory.py` | Generates trajectory summaries and plots |
-| `decider/scripts/diagnose_trajectory.py` | Diagnoses likely push and alignment failure modes |
-| `decider/scripts/analyze_loco_baseline.py` | Summarizes locomotion baseline trajectory metrics |
+| [`decider/scripts/analyze_trajectory.py`](decider/scripts/analyze_trajectory.py) | Generates trajectory summaries and plots |
+| [`decider/scripts/diagnose_trajectory.py`](decider/scripts/diagnose_trajectory.py) | Diagnoses push and alignment failure modes |
 
-Trajectory rows include robot pose, ball position, command values, FSM state, alignment mode, kick conditions, and controller diagnostic values. This makes failures reproducible at frame level instead of relying only on video inspection.
+Trajectory records include robot pose, ball position, velocity commands, FSM state, alignment mode, kick conditions, and controller diagnostics.
 
 ## Repository Structure
 
 ```text
 .
 ├── decider/                   # Decision runtime and strategy logic
-│   ├── user_entry.py          # Main custom strategy entry
-│   ├── interfaces/            # Perception, action, game controller, and sim interfaces
-│   ├── logic/                 # State machines and role policies
-│   └── scripts/               # Team startup and diagnostics
-├── simulation/                # MotrixSim / historical Isaac Sim integration
-├── MotrixLab/                 # K1 locomotion and policy execution subproject
+├── simulation/                # Simulation integration
+├── MotrixLab/                 # K1 locomotion and policy execution
 ├── models/k1/                 # Default K1 policy models
 ├── docs/assets/demo/          # Demo replay and diagnostic plots
-├── scripts/                   # Simulation, decider, and recording helpers
+├── scripts/                   # Launch and recording scripts
 ├── requirements.txt
 ├── compose.yaml
 ├── LICENSE
 └── COPYRIGHT
 ```
 
+## Contributing
+
+Issues and pull requests are welcome. Documentation, reproducibility notes, and diagnostic script improvements are especially useful. Avoid committing large generated assets unless they are necessary for review or reproduction.
+
 ## License
 
-This repository is organized as a portfolio and reproducibility record for the MotrixArena S2 competition. Upstream simulation assets, robot models, and related framework components remain the property of their respective maintainers.
+GPL-3.0-or-later © MOS-Brain Contributors.
 
-See [LICENSE](LICENSE) and [COPYRIGHT](COPYRIGHT) for license and attribution details.
+See [`LICENSE`](LICENSE) and [`COPYRIGHT`](COPYRIGHT) for license and attribution details.
