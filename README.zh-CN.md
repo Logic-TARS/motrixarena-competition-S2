@@ -106,11 +106,7 @@ pip install -r requirements.txt
 
 | 资产 | 链接 | 说明 |
 | --- | --- | --- |
-| 3v3 比赛回放 | [`demo-match-20260614-105108.mp4`](docs/assets/demo/demo-match-20260614-105108.mp4) | 本地录制的 3v3 仿真回放 |
-| 3v3 回放 GIF 1 | [`football-1.gif`](docs/assets/demo/football-1.gif) | 适合 README 直接展示的动画回放 |
-| 3v3 回放 GIF 2 | [`football-2.gif`](docs/assets/demo/football-2.gif) | 适合 README 直接展示的动画回放 |
-| 3v3 源视频 1 | [`football-1.mp4`](docs/assets/demo/football-1.mp4) | GIF 1 的源视频 |
-| 3v3 源视频 2 | [`football-2.mp4`](docs/assets/demo/football-2.mp4) | GIF 2 的源视频 |
+| 3v3 比赛回放 | [`football-1.mp4`](docs/assets/demo/football-1.mp4) | 本地录制的 3v3 仿真回放 |
 | 轨迹时间序列 | [`demo-trajectory-timeseries.png`](docs/assets/demo/demo-trajectory-timeseries.png) | 机器人、球和控制命令随时间变化 |
 | Locomotion 速度跟踪 | [`loco-v030-velocity-tracking.png`](docs/assets/demo/loco-v030-velocity-tracking.png) | `T1_forward_velocity/v030` 的速度跟踪诊断图 |
 

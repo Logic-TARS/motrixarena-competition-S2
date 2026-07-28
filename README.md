@@ -101,11 +101,7 @@ Record a match:
 
 | Asset | Link | Description |
 | --- | --- | --- |
-| 3v3 match replay | [`demo-match-20260614-105108.mp4`](docs/assets/demo/demo-match-20260614-105108.mp4) | Local 3v3 simulation replay |
-| 3v3 replay GIF 1 | [`football-1.gif`](docs/assets/demo/football-1.gif) | README-friendly animated replay |
-| 3v3 replay GIF 2 | [`football-2.gif`](docs/assets/demo/football-2.gif) | README-friendly animated replay |
-| 3v3 source video 1 | [`football-1.mp4`](docs/assets/demo/football-1.mp4) | Source video for GIF 1 |
-| 3v3 source video 2 | [`football-2.mp4`](docs/assets/demo/football-2.mp4) | Source video for GIF 2 |
+| 3v3 match replay | [`football-1.mp4`](docs/assets/demo/football-1.mp4) | Local 3v3 simulation replay |
 | Trajectory time series | [`demo-trajectory-timeseries.png`](docs/assets/demo/demo-trajectory-timeseries.png) | Robot, ball, and command values over time |
 | Locomotion tracking | [`loco-v030-velocity-tracking.png`](docs/assets/demo/loco-v030-velocity-tracking.png) | Velocity-tracking diagnostic for `T1_forward_velocity/v030` |
 
